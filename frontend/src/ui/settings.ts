@@ -12,6 +12,8 @@ interface Field {
   step: number;
 }
 
+// 時間類欄位的 min 一律 > 0（≤ 0 會讓狀態機每幀在 READY / ATTRACT 間來回跳）：
+// 持續、逾時類 ≥ 0.5 s，countdown_s、result_s ≥ 1 s。
 const GROUPS: { title: string; fields: Field[] }[] = [
   {
     title: '偵測',
@@ -35,9 +37,9 @@ const GROUPS: { title: string; fields: Field[] }[] = [
   {
     title: '遊戲節奏',
     fields: [
-      { key: 'start_hold_s', label: '舉手持續 (s)', min: 0.2, max: 5, step: 0.1 },
+      { key: 'start_hold_s', label: '舉手持續 (s)', min: 0.5, max: 5, step: 0.1 },
       { key: 'stillness_speed_mps', label: '靜止速度門檻 (m/s)', min: 0.02, max: 0.6, step: 0.01 },
-      { key: 'stillness_hold_s', label: '靜止持續 (s)', min: 0.3, max: 5, step: 0.1 },
+      { key: 'stillness_hold_s', label: '靜止持續 (s)', min: 0.5, max: 5, step: 0.1 },
       { key: 'posing_max_s', label: '擺姿勢上限 (s)', min: 5, max: 60, step: 1 },
       { key: 'countdown_s', label: '倒數 (s)', min: 1, max: 10, step: 1 },
       { key: 'result_s', label: '結果顯示 (s)', min: 3, max: 60, step: 1 },
@@ -54,6 +56,18 @@ const GROUPS: { title: string; fields: Field[] }[] = [
   },
 ];
 
+const FIELDS: Field[] = GROUPS.flatMap((g) => g.fields);
+
+/** 送出前檢查：每個欄位都要在滑桿範圍內，且最近距離 < 最遠距離。回傳錯誤訊息或 null。 */
+export function validateSettings(s: Settings): string | null {
+  for (const f of FIELDS) {
+    const v = s[f.key];
+    if (!Number.isFinite(v) || v < f.min || v > f.max) return `${f.label} 必須在 ${f.min}–${f.max} 之間`;
+  }
+  if (s.depth_near_m >= s.depth_far_m) return '最近距離必須小於最遠距離';
+  return null;
+}
+
 /**
  * 布置用設定面板（路人碰不到；由 main 綁 Ctrl+Shift+S 呼叫 toggle）。
  * 改完放開滑桿 → PUT /api/settings；打開時要求後端推相機預覽。
@@ -69,6 +83,8 @@ export class SettingsPanel {
   private readonly persons: HTMLOListElement;
   private readonly status: HTMLElement;
   private isOpen = false;
+  /** 拿到過伺服器的設定（GET 成功或收到 settings 廣播）之前，不准 PUT，滑桿鎖住。 */
+  private synced = false;
 
   constructor(root: HTMLElement, deps: { ws: WSClient; api: Api }) {
     this.ws = deps.ws;
@@ -103,6 +119,7 @@ export class SettingsPanel {
       }
     }
     this.setPreview({ type: 'preview', jpeg_b64: '', persons: [] });
+    this.setSynced(false);
     root.appendChild(this.el);
   }
 
@@ -117,8 +134,14 @@ export class SettingsPanel {
     if (this.isOpen) {
       this.api
         .getSettings()
-        .then((s) => this.setSettings(s))
-        .catch(() => this.setStatus('讀取設定失敗', true));
+        .then((s) => {
+          this.setSettings(s);
+          this.setStatus('已連線', false);
+        })
+        .catch(() => {
+          // 已經有伺服器設定（例如 WS 廣播）就繼續用；沒有就保持鎖住
+          this.setStatus(this.synced ? '讀取設定失敗（沿用上次的值）' : '未連線：讀不到伺服器設定，暫停儲存', true);
+        });
     } else {
       this.img.removeAttribute('src');
     }
@@ -128,6 +151,7 @@ export class SettingsPanel {
   setSettings(s: Settings): void {
     Object.assign(this.values, s);
     for (const c of this.controllers) c.updateDisplay();
+    this.setSynced(true);
   }
 
   setPreview(m: PreviewMsg): void {
@@ -149,12 +173,28 @@ export class SettingsPanel {
   }
 
   private async save(): Promise<void> {
+    if (!this.synced) {
+      // 滑桿已鎖，這裡是保險：絕不拿預設值蓋掉伺服器上的設定
+      this.setStatus('未連線：暫停儲存', true);
+      return;
+    }
+    const err = validateSettings(this.values);
+    if (err) {
+      this.setStatus(`未儲存：${err}`, true);
+      return;
+    }
     try {
       await this.api.putSettings({ ...this.values });
       this.setStatus('已儲存', false);
     } catch {
       this.setStatus('儲存失敗', true);
     }
+  }
+
+  private setSynced(on: boolean): void {
+    this.synced = on;
+    for (const c of this.controllers) c.enable(on);
+    if (!on) this.setStatus('未連線', true);
   }
 
   private setStatus(text: string, error: boolean): void {

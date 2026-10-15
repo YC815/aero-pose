@@ -14,20 +14,53 @@ export interface WSHandlers {
 
 const OPEN = 1;
 
-/** 連線到後端 /ws；斷線後每 retryMs 重連，直到呼叫 close()。 */
+/**
+ * 連線到後端 /ws；斷線後每 retryMs 重連，直到呼叫 close()。
+ * watchdog：連線中或已連線，超過 staleMs 沒收到任何資料（含壞封包）就當作半開連線，
+ * 主動丟掉、呼叫 onClose、排重連。後端每秒推 status，所以 3 秒沒資料一定是斷了。
+ */
 export function connectWS(
   url: string,
   handlers: WSHandlers,
-  opts: { retryMs?: number; WebSocketImpl?: typeof WebSocket } = {},
+  opts: { retryMs?: number; staleMs?: number; WebSocketImpl?: typeof WebSocket } = {},
 ): WSClient {
   const retryMs = opts.retryMs ?? 1000;
+  const staleMs = opts.staleMs ?? 3000;
   const Impl = opts.WebSocketImpl ?? WebSocket;
   let socket: WebSocket | null = null;
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  let staleTimer: ReturnType<typeof setTimeout> | null = null;
   let stopped = false;
+
+  function clearStale(): void {
+    if (staleTimer !== null) clearTimeout(staleTimer);
+    staleTimer = null;
+  }
+
+  function armStale(ws: WebSocket): void {
+    clearStale();
+    staleTimer = setTimeout(() => drop(ws), staleMs);
+  }
 
   function scheduleRetry(): void {
     if (!stopped && retryTimer === null) retryTimer = setTimeout(open, retryMs);
+  }
+
+  /** 收掉一條連線；只對目前這條有效，所以遲到的 close 事件不會重複觸發。 */
+  function drop(ws: WebSocket): void {
+    if (socket !== ws) return;
+    socket = null;
+    clearStale();
+    ws.onopen = null;
+    ws.onmessage = null;
+    ws.onclose = null;
+    try {
+      ws.close();
+    } catch {
+      // 已經關了就算了
+    }
+    handlers.onClose?.();
+    scheduleRetry();
   }
 
   function open(): void {
@@ -40,8 +73,13 @@ export function connectWS(
       return;
     }
     socket = ws;
-    ws.onopen = () => handlers.onOpen?.();
+    armStale(ws);
+    ws.onopen = () => {
+      armStale(ws);
+      handlers.onOpen?.();
+    };
     ws.onmessage = (ev: MessageEvent) => {
+      armStale(ws);
       let msg: ServerMsg;
       try {
         msg = JSON.parse(String(ev.data)) as ServerMsg;
@@ -50,11 +88,7 @@ export function connectWS(
       }
       handlers.onMessage(msg);
     };
-    ws.onclose = () => {
-      if (socket === ws) socket = null;
-      handlers.onClose?.();
-      scheduleRetry();
-    };
+    ws.onclose = () => drop(ws);
   }
 
   open();
@@ -67,8 +101,7 @@ export function connectWS(
       stopped = true;
       if (retryTimer !== null) clearTimeout(retryTimer);
       retryTimer = null;
-      socket?.close();
-      socket = null;
+      if (socket) drop(socket);
     },
     get connected(): boolean {
       return socket !== null && socket.readyState === OPEN;

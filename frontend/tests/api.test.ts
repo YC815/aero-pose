@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createApi } from '../src/net/api';
 import { DEFAULT_SETTINGS, type LeaderboardEntry, type ResultResponse } from '../src/types';
 
@@ -93,5 +93,57 @@ describe('createApi', () => {
   it('非 2xx（4xx）也要 throw', async () => {
     const f = fakeFetch(422, { detail: 'bad' });
     await expect(createApi(f.impl).putSettings(DEFAULT_SETTINGS)).rejects.toThrow(/422/);
+  });
+
+  describe('逾時', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    /** 永遠不回應、但會尊重 AbortSignal 的 fetch。 */
+    function hangingFetch() {
+      const signals: (AbortSignal | undefined)[] = [];
+      const impl = ((_input: RequestInfo | URL, init?: RequestInit) => {
+        signals.push(init?.signal ?? undefined);
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+        });
+      }) as typeof fetch;
+      return { impl, signals };
+    }
+
+    it('每個請求都帶 AbortSignal', async () => {
+      const f = fakeFetch(200, DEFAULT_SETTINGS);
+      await createApi(f.impl).getSettings();
+      expect(f.calls[0].init?.signal).toBeInstanceOf(AbortSignal);
+    });
+
+    it('預設 8 秒沒回應就 abort 並 throw 逾時', async () => {
+      vi.useFakeTimers();
+      const f = hangingFetch();
+      const p = createApi(f.impl).postResult({ area_m2: 1, baseline_m2: 1, watts_saved: 0, png_b64: '' });
+      const settled = expect(p).rejects.toThrow(/逾時/);
+      await vi.advanceTimersByTimeAsync(7999);
+      expect(f.signals[0]?.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(f.signals[0]?.aborted).toBe(true);
+      await settled;
+    });
+
+    it('可自訂 timeoutMs', async () => {
+      vi.useFakeTimers();
+      const f = hangingFetch();
+      const p = createApi(f.impl, { timeoutMs: 100 }).getLeaderboard();
+      const settled = expect(p).rejects.toThrow(/逾時/);
+      await vi.advanceTimersByTimeAsync(100);
+      await settled;
+    });
+
+    it('成功回應後不會留下計時器', async () => {
+      vi.useFakeTimers();
+      const f = fakeFetch(200, []);
+      await createApi(f.impl).getLeaderboard();
+      expect(vi.getTimerCount()).toBe(0);
+    });
   });
 });

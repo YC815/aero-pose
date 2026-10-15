@@ -1,11 +1,29 @@
 import type { LeaderboardEntry, ResultRequest, ResultResponse, Settings } from '../types';
 
-/** REST 客戶端。fetchImpl 可注入，方便測試。非 2xx 一律 throw。 */
-export function createApi(fetchImpl: typeof fetch = (...args) => fetch(...args)) {
-  async function request<T>(url: string, init?: RequestInit): Promise<T> {
-    const res = await fetchImpl(url, init);
-    if (!res.ok) throw new Error(`${init?.method ?? 'GET'} ${url} 失敗：HTTP ${res.status}`);
-    return (await res.json()) as T;
+/**
+ * REST 客戶端。fetchImpl 可注入，方便測試。
+ * 非 2xx 一律 throw；每個請求（含讀 body）超過 timeoutMs（預設 8 秒）就 abort 並 throw「逾時」。
+ */
+export function createApi(
+  fetchImpl: typeof fetch = (...args) => fetch(...args),
+  opts: { timeoutMs?: number } = {},
+) {
+  const timeoutMs = opts.timeoutMs ?? 8000;
+
+  async function request<T>(url: string, init: RequestInit): Promise<T> {
+    const method = init.method ?? 'GET';
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const res = await fetchImpl(url, { ...init, signal: ctrl.signal });
+      if (!res.ok) throw new Error(`${method} ${url} 失敗：HTTP ${res.status}`);
+      return (await res.json()) as T;
+    } catch (e) {
+      if (ctrl.signal.aborted) throw new Error(`${method} ${url} 逾時（${timeoutMs} ms）`);
+      throw e;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   function sendJson(method: 'PUT' | 'POST', body: unknown): RequestInit {

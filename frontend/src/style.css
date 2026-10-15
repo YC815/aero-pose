@@ -768,60 +768,62 @@ body {
 
 .ap-result__area {
   margin-top: 0.4vh;
-  font-size: 15vh;
+  font-size: 13vh;
   line-height: 0.95;
   white-space: nowrap;
 }
 
-.ap-result__pct {
-  margin-top: 1.6vh;
-  font-size: 4.2vh;
-  font-weight: 800;
+.ap-result__stats {
+  display: flex;
+  flex-wrap: wrap; /* 非 16:9 螢幕放不下時換行，不重疊 */
+  gap: 2vh 3vw;
+  margin-top: 2.4vh;
+}
+
+.ap-stat__label {
+  font-size: 3vh;
+  font-weight: 700;
+  color: var(--ap-dim);
   white-space: nowrap;
 }
 
+.ap-stat__value {
+  margin-top: 0.4vh;
+  font-size: 11vh; /* ≥ 10vh：3 公尺外看得清 */
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.ap-stat__value small {
+  margin-left: 0.4vh;
+  font-size: 2.4vh;
+  font-weight: 500;
+  color: var(--ap-dim);
+}
+
 .ap-result__pct-n {
-  font-size: 2em;
   color: var(--ap-wind);
   text-shadow: 0 0 3vh var(--ap-wind-glow);
 }
 
-.ap-result__pct-n.is-worse {
+.ap-result__pct-n.is-worse,
+.ap-result__watts-n {
   color: var(--ap-ink);
   text-shadow: none;
 }
 
-.ap-result__watts {
-  margin-top: 1.4vh;
-  font-size: 3.8vh;
-  font-weight: 700;
-  white-space: nowrap;
-}
-
-.ap-result__watts b {
-  font-size: 1.5em;
-  font-weight: 900;
-}
-
-.ap-result__watts b.is-saved {
+.ap-result__watts-n.is-saved {
   color: var(--ap-hi);
-  text-shadow: 0 0 2.4vh var(--ap-hi-glow);
-}
-
-.ap-result__watts small {
-  margin-left: 0.3em;
-  font-size: 0.62em;
-  font-weight: 500;
-  color: var(--ap-dim);
+  text-shadow: 0 0 3vh var(--ap-hi-glow);
 }
 
 .ap-result__server {
   display: flex;
   align-items: center;
   gap: 2.4vw;
-  min-height: 21vh;
-  margin-top: 3vh;
-  padding-top: 3vh;
+  min-height: 20vh;
+  margin-top: 2.6vh;
+  padding-top: 2.6vh;
   border-top: 1px solid var(--ap-line);
 }
 

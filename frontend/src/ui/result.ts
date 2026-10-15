@@ -23,13 +23,14 @@ export class ResultScreen {
   private readonly area: HTMLElement;
   private readonly pctLabel: HTMLElement;
   private readonly pct: HTMLElement;
+  private readonly wattsLabel: HTMLElement;
   private readonly watts: HTMLElement;
   private readonly server: HTMLElement;
   private readonly rank: HTMLElement;
   private readonly rider: HTMLElement;
   private readonly qrBox: HTMLElement;
   private readonly qrCanvas: HTMLCanvasElement;
-  /** 每次 show 加一，避免舊的 QR 非同步結果畫到新的玩家上。 */
+  /** 每次 show / hide 加一；舊一輪的名次回應或 QR 非同步結果不會寫進新的一輪。 */
   private session = 0;
 
   constructor(root: HTMLElement) {
@@ -46,8 +47,16 @@ export class ResultScreen {
       <div class="ap-result__data">
         <p class="ap-label">你的正面面積</p>
         <p class="ap-result__area"><span class="ap-num ap-result__area-n"></span><span class="ap-unit">m²</span></p>
-        <p class="ap-result__pct"><span class="ap-result__pct-label"></span> <span class="ap-num ap-result__pct-n"></span></p>
-        <p class="ap-result__watts"></p>
+        <div class="ap-result__stats">
+          <div class="ap-stat">
+            <p class="ap-stat__label ap-result__pct-label"></p>
+            <p class="ap-stat__value"><span class="ap-num ap-result__pct-n"></span></p>
+          </div>
+          <div class="ap-stat">
+            <p class="ap-stat__label ap-result__watts-label"></p>
+            <p class="ap-stat__value"><span class="ap-num ap-result__watts-n"></span><span class="ap-unit">瓦</span><small>（估算）</small></p>
+          </div>
+        </div>
         <div class="ap-result__server">
           <p class="ap-result__pending">登錄今日排行榜中…</p>
           <p class="ap-result__rank">
@@ -66,7 +75,8 @@ export class ResultScreen {
     this.area = this.el.querySelector('.ap-result__area-n') as HTMLElement;
     this.pctLabel = this.el.querySelector('.ap-result__pct-label') as HTMLElement;
     this.pct = this.el.querySelector('.ap-result__pct-n') as HTMLElement;
-    this.watts = this.el.querySelector('.ap-result__watts') as HTMLElement;
+    this.wattsLabel = this.el.querySelector('.ap-result__watts-label') as HTMLElement;
+    this.watts = this.el.querySelector('.ap-result__watts-n') as HTMLElement;
     this.server = this.el.querySelector('.ap-result__server') as HTMLElement;
     this.rank = this.el.querySelector('.ap-result__rank-n') as HTMLElement;
     this.rider = this.el.querySelector('.ap-result__rider') as HTMLElement;
@@ -76,7 +86,11 @@ export class ResultScreen {
     root.appendChild(this.el);
   }
 
-  show(d: ResultView): void {
+  /**
+   * 顯示結果，回傳這一輪的 session 編號。
+   * 呼叫端把它傳回 setServerInfo，舊一輪遲到的回應就會被丟掉。
+   */
+  show(d: ResultView): number {
     this.session++;
     const t = resultTexts(d);
     this.area.textContent = t.area;
@@ -84,11 +98,9 @@ export class ResultScreen {
     this.pct.textContent = t.pct;
     this.pct.classList.toggle('is-worse', !t.saved);
 
-    this.watts.replaceChildren(
-      `時速 ${t.speedKmh} km 約${t.wattsVerb} `,
-      Object.assign(document.createElement('b'), { textContent: t.watts, className: t.saved ? 'is-saved' : '' }),
-      Object.assign(document.createElement('small'), { textContent: '（估算）' }),
-    );
+    this.wattsLabel.textContent = `時速 ${t.speedKmh} km 約${t.wattsVerb}`;
+    this.watts.textContent = t.wattsNum;
+    this.watts.classList.toggle('is-saved', t.saved);
 
     const ctx = this.canvas.getContext('2d');
     if (ctx) {
@@ -102,10 +114,18 @@ export class ResultScreen {
     this.el.classList.remove('is-visible');
     void this.el.offsetWidth; // 重播進場動畫
     this.el.classList.add('is-visible');
+    return this.session;
   }
 
-  /** null = 上傳失敗或沒連上後端：不顯示名次與 QR。 */
-  setServerInfo(info: { number: number; rank: number; qrUrl: string | null } | null): void {
+  /**
+   * null = 上傳失敗或沒連上後端：不顯示名次與 QR。
+   * 有給 session 時必須等於目前這一輪 show() 的回傳值，否則丟掉；
+   * 不論有沒有給，畫面已 hide 或這一輪已經收過結果都會丟掉。
+   */
+  setServerInfo(info: { number: number; rank: number; qrUrl: string | null } | null, session?: number): void {
+    if (session !== undefined && session !== this.session) return;
+    if (!this.el.classList.contains('is-visible')) return;
+    if (this.server.dataset.state !== 'pending') return;
     if (info === null) {
       this.server.dataset.state = 'none';
       return;
@@ -116,7 +136,7 @@ export class ResultScreen {
     this.qrBox.hidden = true;
     if (!info.qrUrl) return;
 
-    const session = this.session;
+    const current = this.session;
     QRCode.toCanvas(this.qrCanvas, info.qrUrl, {
       margin: 1,
       width: 320,
@@ -124,7 +144,7 @@ export class ResultScreen {
       color: { dark: '#030812ff', light: '#ffffffff' },
     })
       .then(() => {
-        if (session === this.session) this.qrBox.hidden = false;
+        if (current === this.session) this.qrBox.hidden = false;
       })
       .catch(() => {
         // QR 產生失敗就不顯示，名次照樣顯示

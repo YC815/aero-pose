@@ -150,4 +150,96 @@ describe('connectWS', () => {
     vi.advanceTimersByTime(10_000);
     expect(FakeWS.instances).toHaveLength(1);
   });
+
+  describe('半開連線 watchdog', () => {
+    it('已連線但 staleMs（預設 3000）沒收到訊息：主動 close、呼叫 onClose、retryMs 後重連', () => {
+      const onClose = vi.fn();
+      const c = connectWS('ws://h/ws', { onMessage: () => {}, onClose }, { WebSocketImpl: Impl, retryMs: 1000 });
+      const ws = FakeWS.instances[0];
+      ws.fireOpen();
+      vi.advanceTimersByTime(2999);
+      expect(ws.closeCalls).toBe(0);
+      expect(onClose).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(1);
+      expect(ws.closeCalls).toBe(1);
+      expect(onClose).toHaveBeenCalledOnce();
+      expect(c.connected).toBe(false);
+      vi.advanceTimersByTime(1000);
+      expect(FakeWS.instances).toHaveLength(2);
+    });
+
+    it('持續有訊息就不會被斷', () => {
+      const onClose = vi.fn();
+      connectWS('ws://h/ws', { onMessage: () => {}, onClose }, { WebSocketImpl: Impl });
+      const ws = FakeWS.instances[0];
+      ws.fireOpen();
+      for (let i = 0; i < 10; i++) {
+        vi.advanceTimersByTime(2500);
+        ws.fireMessage(JSON.stringify({ type: 'status', camera: 'ok', fps: 30 }));
+      }
+      expect(ws.closeCalls).toBe(0);
+      expect(onClose).not.toHaveBeenCalled();
+      expect(FakeWS.instances).toHaveLength(1);
+    });
+
+    it('壞 JSON 也算有收到資料（連線是活的）', () => {
+      connectWS('ws://h/ws', { onMessage: () => {} }, { WebSocketImpl: Impl });
+      const ws = FakeWS.instances[0];
+      ws.fireOpen();
+      vi.advanceTimersByTime(2500);
+      ws.fireMessage('{bad');
+      vi.advanceTimersByTime(2500);
+      expect(ws.closeCalls).toBe(0);
+    });
+
+    it('可自訂 staleMs', () => {
+      connectWS('ws://h/ws', { onMessage: () => {} }, { WebSocketImpl: Impl, staleMs: 500 });
+      const ws = FakeWS.instances[0];
+      ws.fireOpen();
+      vi.advanceTimersByTime(500);
+      expect(ws.closeCalls).toBe(1);
+    });
+
+    it('一直卡在連線中（沒 open）也會在 staleMs 後放棄重來', () => {
+      connectWS('ws://h/ws', { onMessage: () => {} }, { WebSocketImpl: Impl, retryMs: 1000 });
+      vi.advanceTimersByTime(3000);
+      expect(FakeWS.instances[0].closeCalls).toBe(1);
+      vi.advanceTimersByTime(1000);
+      expect(FakeWS.instances).toHaveLength(2);
+    });
+
+    it('被 watchdog 斷掉的舊連線，之後才到的 close 事件不會重複觸發 onClose 或多開連線', () => {
+      const onClose = vi.fn();
+      // close() 不同步觸發 onclose，模擬瀏覽器在半開連線上 close 很久才回來
+      class SlowCloseWS extends FakeWS {
+        override close() {
+          this.closeCalls++;
+        }
+      }
+      connectWS('ws://h/ws', { onMessage: () => {}, onClose }, {
+        WebSocketImpl: SlowCloseWS as unknown as typeof WebSocket,
+        retryMs: 1000,
+      });
+      const ws = FakeWS.instances[0];
+      ws.fireOpen();
+      vi.advanceTimersByTime(3000);
+      expect(onClose).toHaveBeenCalledOnce();
+      vi.advanceTimersByTime(1000);
+      expect(FakeWS.instances).toHaveLength(2);
+      ws.fireClose(); // 遲到的 close
+      expect(onClose).toHaveBeenCalledOnce();
+      vi.advanceTimersByTime(5000);
+      // 第 3 條只來自第 2 條自己的 watchdog（4000 建立 → 7000 逾時 → 8000 重連），遲到的 close 沒多開
+      expect(FakeWS.instances).toHaveLength(3);
+    });
+
+    it('close() 後 watchdog 也停止', () => {
+      const c = connectWS('ws://h/ws', { onMessage: () => {} }, { WebSocketImpl: Impl });
+      FakeWS.instances[0].fireOpen();
+      c.close();
+      vi.advanceTimersByTime(10_000);
+      expect(FakeWS.instances[0].closeCalls).toBe(1);
+      expect(FakeWS.instances).toHaveLength(1);
+    });
+  });
 });

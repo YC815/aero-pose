@@ -26,6 +26,7 @@ export interface ResultTexts {
   speedKmh: number;
   wattsVerb: string; // "省" / "多花"
   watts: string; // "37 瓦"
+  wattsNum: string; // "37"
   saved: boolean;
 }
 
@@ -39,6 +40,7 @@ export function resultTexts(d: ResultView): ResultTexts {
     speedKmh: Math.round(d.speedKmh ?? 40),
     wattsVerb: saved ? '省' : '多花',
     watts: `${Math.abs(Math.round(d.watts))} 瓦`,
+    wattsNum: String(Math.abs(Math.round(d.watts))),
     saved,
   };
 }

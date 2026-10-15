@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { describe, expect, it } from 'vitest';
 import { frontalArea } from '../src/area';
 import { AERO_DEMO_POSE, UPRIGHT_POSE } from '../src/poses';
-import { torsoLocalToThree, torsoQuaternion } from '../src/rider/body';
+import { torsoLocalToThree, torsoQuaternion, upperArmQuaternion } from '../src/rider/body';
 import { ANKLE_FROM_PEDAL } from '../src/rider/legs';
 import { createRider, FREEZE_CRANK_ANGLE, type Rider } from '../src/rider';
 import type { RiderPose } from '../src/types';
@@ -55,14 +55,12 @@ describe('座標轉換（spec §3 手性）', () => {
 describe('Rider', () => {
   it('UPRIGHT_POSE 面積在 0.45–0.55 m²', () => {
     const a = areaOf(UPRIGHT_POSE);
-    console.log(`UPRIGHT area = ${a.toFixed(4)} m²`);
     expect(a).toBeGreaterThanOrEqual(0.45);
     expect(a).toBeLessThanOrEqual(0.55);
   });
 
   it('AERO_DEMO_POSE 面積 ≤ 0.38 m²', () => {
     const a = areaOf(AERO_DEMO_POSE);
-    console.log(`AERO area = ${a.toFixed(4)} m²`);
     expect(a).toBeLessThanOrEqual(0.38);
   });
 
@@ -96,6 +94,89 @@ describe('Rider', () => {
     expect(face(UPRIGHT_POSE).y).toBeCloseTo(0, 6);
   });
 
+  it('torsoRoll 正值：肩中點往本人左側（Three.js −x）', () => {
+    const r = createRider();
+    r.setPose({ ...UPRIGHT_POSE, torsoRoll: 0.25 });
+    const shoulder = mid(world(r, 'shoulder_L'), world(r, 'shoulder_R'));
+    const hip = mid(world(r, 'hip_L'), world(r, 'hip_R'));
+    expect(shoulder.x).toBeLessThan(hip.x - 0.05);
+  });
+
+  it('torsoYaw 正值：本人左肩往 −z', () => {
+    const r = createRider();
+    r.setPose(UPRIGHT_POSE);
+    const before = world(r, 'shoulder_L').z;
+    r.setPose({ ...UPRIGHT_POSE, torsoYaw: 0.3 });
+    const after = world(r, 'shoulder_L');
+    expect(after.z).toBeLessThan(before - 0.03);
+    expect(world(r, 'shoulder_R').z).toBeGreaterThan(after.z);
+  });
+
+  it('leftForearm = (1,0,0) 時左手腕在左手肘的 −x 側', () => {
+    const r = createRider();
+    r.setPose({ ...UPRIGHT_POSE, leftForearm: [1, 0, 0] });
+    expect(world(r, 'hand_L').x).toBeLessThan(world(r, 'elbow_L').x - 0.2);
+  });
+
+  it('上臂從前平舉連續掃到舉過頭頂，手肘與上臂／手的姿態都連續（無四元數翻轉）', () => {
+    const r = createRider();
+    const qUpper = new THREE.Quaternion();
+    const qHand = new THREE.Quaternion();
+    let prevElbow: THREE.Vector3 | null = null;
+    let prevUpper: THREE.Quaternion | null = null;
+    let prevHand: THREE.Quaternion | null = null;
+    const steps = 400;
+    for (const out of [0, 0.15, -0.15]) {
+      prevElbow = prevUpper = prevHand = null;
+      for (let i = 0; i <= steps; i++) {
+        // 前舉 90°（正前方）→ 180°（正上方）→ 190°（略往後），帶一點側展
+        const a = ((90 + (100 * i) / steps) * Math.PI) / 180;
+        const up: [number, number, number] = [out, -Math.cos(a), -Math.sin(a)];
+        r.setPose({ ...UPRIGHT_POSE, torsoPitch: 0, leftUpperArm: up, leftForearm: up });
+        const elbow = world(r, 'elbow_L');
+        r.root.getObjectByName('upperArm_L')!.getWorldQuaternion(qUpper);
+        r.root.getObjectByName('hand_L')!.getWorldQuaternion(qHand);
+        if (prevElbow && prevUpper && prevHand) {
+          expect(elbow.distanceTo(prevElbow)).toBeLessThan(0.01);
+          expect(qUpper.angleTo(prevUpper)).toBeLessThan(0.05);
+          expect(qHand.angleTo(prevHand)).toBeLessThan(0.05);
+        }
+        prevElbow = elbow;
+        prevUpper = qUpper.clone();
+        prevHand = qHand.clone();
+      }
+    }
+  });
+
+  it('upperArmQuaternion：骨軸對到目標，手臂下垂時為單位旋轉', () => {
+    for (const d of [
+      [0, -1, 0],
+      [0, 1, 0],
+      [0, 0, -1],
+      [1, 0, 0],
+      [-0.3, 0.9, 0.1],
+    ] as const) {
+      const v = new THREE.Vector3(...d).normalize();
+      const got = new THREE.Vector3(0, -1, 0).applyQuaternion(upperArmQuaternion(v));
+      expect(got.distanceTo(v)).toBeLessThan(1e-9);
+    }
+    expect(upperArmQuaternion(new THREE.Vector3(0, -1, 0)).angleTo(new THREE.Quaternion())).toBeLessThan(1e-7);
+  });
+
+  it('triangles() 是 root 局部座標：外層有鏡像和旋轉時面積不變', () => {
+    const r = createRider();
+    r.setPose(UPRIGHT_POSE);
+    r.setCrankAngle(FREEZE_CRANK_ANGLE);
+    const plain = frontalArea(r.triangles()).areaM2;
+    const parent = new THREE.Group();
+    parent.scale.x = -1;
+    parent.rotation.set(0.3, 1.1, -0.2);
+    parent.position.set(2, 1, -3);
+    parent.add(r.root);
+    parent.updateMatrixWorld(true);
+    expect(frontalArea(r.triangles()).areaM2).toBeCloseTo(plain, 9);
+  });
+
   it('本人左側在 Three.js −x', () => {
     const r = createRider();
     r.setPose(UPRIGHT_POSE);
@@ -118,7 +199,6 @@ describe('Rider', () => {
     const b = world(r, 'barTop_R');
     const dl = distToSegment(world(r, 'hand_L'), a, b);
     const dr = distToSegment(world(r, 'hand_R'), a, b);
-    console.log(`wrist→bar: L ${dl.toFixed(3)} m, R ${dr.toFixed(3)} m`);
     expect(dl).toBeLessThan(0.08);
     expect(dr).toBeLessThan(0.08);
   });
@@ -151,14 +231,15 @@ describe('Rider', () => {
     }
   });
 
-  it('三角形數 < 30000，且重複呼叫結果一致', () => {
+  it('三角形數 < 30000，重複呼叫結果一致且重用 buffer', () => {
     const r = createRider();
     r.setPose(UPRIGHT_POSE);
-    const t = r.triangles();
-    console.log(`triangles = ${t.length / 9}`);
+    const t = r.triangles().slice();
     expect(t.length % 9).toBe(0);
     expect(t.length / 9).toBeLessThan(30000);
-    expect(r.triangles()).toEqual(t);
+    const again = r.triangles();
+    expect(again).toEqual(t);
+    expect(r.triangles()).toBe(again); // 重複使用內部 buffer
   });
 
   it('setPose 後換姿勢再換回來，面積一致', () => {

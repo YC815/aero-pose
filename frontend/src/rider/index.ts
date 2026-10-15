@@ -9,7 +9,11 @@ export interface Rider {
   root: THREE.Group; // 騎士 + 車，原點 = 前後輪觸地中點，y 朝上，騎士面向 -z
   setPose(p: RiderPose): void;
   setCrankAngle(rad: number): void; // 0 = 右腳曲柄朝正前方（3 點鐘）
-  triangles(): Float32Array; // 所有 mesh 的世界座標三角形（每三角形 9 個 float）
+  /**
+   * 所有可見 mesh 的三角形，座標是 root 的局部座標（每三角形 9 個 float），不受外層鏡像／旋轉影響。
+   * 回傳的是內部重複使用的 buffer，只在下次呼叫 triangles() 前有效；要保留請自行複製。
+   */
+  triangles(): Float32Array;
   setBodyColor(hex: number): void;
 }
 
@@ -44,8 +48,15 @@ export function createRider(): Rider {
     }
   }
 
+  // 重複使用的 buffer：triangles() 的回傳值只在下次呼叫前有效
+  let buf = new Float32Array(0);
+  const rootInv = new THREE.Matrix4();
+  const rel = new THREE.Matrix4();
+
   function triangles(): Float32Array {
     root.updateMatrixWorld(true);
+    // 輸出 root 局部座標：外層鏡像（scale.x = −1）或旋轉都不影響面積
+    rootInv.copy(root.matrixWorld).invert();
     const meshes: THREE.Mesh[] = [];
     let count = 0;
     root.traverseVisible((o) => {
@@ -54,16 +65,18 @@ export function createRider(): Rider {
       meshes.push(o);
       count += g.index ? g.index.count : g.attributes.position.count;
     });
-    const out = new Float32Array(count * 3);
+    if (buf.length < count * 3) buf = new Float32Array(count * 3);
+    const out = buf.length === count * 3 ? buf : buf.subarray(0, count * 3);
     const p = new THREE.Vector3();
     let k = 0;
     for (const mesh of meshes) {
+      rel.multiplyMatrices(rootInv, mesh.matrixWorld);
       const g = mesh.geometry as THREE.BufferGeometry;
       const pos = g.attributes.position;
       const idx = g.index;
       const n = idx ? idx.count : pos.count;
       for (let i = 0; i < n; i++) {
-        p.fromBufferAttribute(pos, idx ? idx.getX(i) : i).applyMatrix4(mesh.matrixWorld);
+        p.fromBufferAttribute(pos, idx ? idx.getX(i) : i).applyMatrix4(rel);
         out[k++] = p.x;
         out[k++] = p.y;
         out[k++] = p.z;

@@ -131,14 +131,28 @@ function createArm(side: Side, m: RiderMaterials): Arm {
   return { shoulder, upperArm, elbow, forearm, hand };
 }
 
+const FORWARD = new THREE.Vector3(0, 0, -1);
+const BONE_TO_FORWARD = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI / 2);
+
+/**
+ * 上臂 group 的旋轉：骨軸 (0,−1,0) 對到 d（Three.js 軀幹座標、單位向量）。
+ * 直接 setFromUnitVectors(骨軸, d) 在 d 接近正上方（舉手）時旋轉軸不穩定，扭轉會突然翻 180°。
+ * 改成先把骨軸固定轉到正前方（繞 x 轉 90°），再從正前方擺到 d：
+ * 唯一的奇異點變成「手臂直直往背後」，retarget 的錐形限制不會出現。手臂自然下垂時結果 = 單位旋轉。
+ */
+export function upperArmQuaternion(d: THREE.Vector3, out = new THREE.Quaternion()): THREE.Quaternion {
+  return out.setFromUnitVectors(FORWARD, d).multiply(BONE_TO_FORWARD);
+}
+
 const tmpUpper = new THREE.Vector3();
 const tmpFore = new THREE.Vector3();
 const tmpInv = new THREE.Quaternion();
 
 function poseArm(arm: Arm, upper: Vec3, fore: Vec3): void {
   torsoLocalToThree(upper, tmpUpper).normalize();
-  arm.upperArm.quaternion.setFromUnitVectors(DOWN, tmpUpper);
-  // 前臂向量是軀幹局部座標，先轉到上臂局部座標
+  upperArmQuaternion(tmpUpper, arm.upperArm.quaternion);
+  // 前臂向量是軀幹局部座標，先轉到上臂局部座標。
+  // 奇異點是肘完全對折（前臂指回肩膀），retarget 限制屈曲 ≤ 150°，不會碰到。
   torsoLocalToThree(fore, tmpFore).normalize();
   tmpInv.copy(arm.upperArm.quaternion).invert();
   tmpFore.applyQuaternion(tmpInv);

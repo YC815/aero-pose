@@ -4,7 +4,7 @@ import { Game } from './game';
 import { createApi } from './net/api';
 import { connectWS, defaultWsUrl } from './net/ws';
 import { AERO_DEMO_POSE, UPRIGHT_POSE } from './poses';
-import { approachPose, lerpPose, retarget } from './retarget';
+import { approachPose, lerpPose } from './retarget';
 import { FREEZE_CRANK_ANGLE } from './rider';
 import { alignMasks, createMeasurer, createScene, FREEZE_FRAMES, freezeResult } from './scene';
 import { DEFAULT_SETTINGS, type GameState, type PlayerSkeleton, type RiderPose, type Settings } from './types';
@@ -14,6 +14,8 @@ import { Hud } from './ui/hud';
 import { MaintenanceScreen } from './ui/maintenance';
 import { ResultScreen, type ResultView } from './ui/result';
 import { SettingsPanel } from './ui/settings';
+import { PoseTracker } from './tracker';
+import { keepScreenAwake } from './wakelock';
 import { Wind } from './wind';
 
 const LIVE_AREA_INTERVAL_S = 0.25; // triangles() 每次約 430 KB，不准每幀算
@@ -42,8 +44,7 @@ let wsUp = false;
 let camera: 'ok' | 'disconnected' = 'disconnected';
 let player: PlayerSkeleton | null = null;
 let playerAt = -Infinity;
-let target: RiderPose = UPRIGHT_POSE; // 最新一幀 retarget 結果（沒玩家 = 坐直）
-let recent: RiderPose[] = []; // 最近 FREEZE_FRAMES 幀 retarget 結果，定格用
+const tracker = new PoseTracker(FREEZE_FRAMES); // 跟隨目標 + 定格緩衝（軀幹被擋的幀不算數）
 let pose: RiderPose = UPRIGHT_POSE; // 畫面上騎士目前的姿勢
 let crank = FREEZE_CRANK_ANGLE;
 let demoT = 0;
@@ -51,11 +52,26 @@ let nextLiveArea = 0;
 let nextBoard = 0;
 let maintReason = '';
 
+keepScreenAwake(); // 無人攤位：螢幕不能睡
+
 // ---- 網路 ----
 const api = createApi();
+
+/** WS 的 settings 訊息在慢 client 可能被丟掉（佇列滿丟最舊），每次連上都用 REST 再拿一次。 */
+function refreshSettings(): void {
+  api.getSettings().then(
+    (s) => {
+      settings = { ...DEFAULT_SETTINGS, ...s };
+      panel.setSettings(settings);
+    },
+    (e) => console.warn('讀取設定失敗，沿用目前設定', e),
+  );
+}
+
 const ws = connectWS(defaultWsUrl(), {
   onOpen: () => {
     wsUp = true;
+    refreshSettings();
     // 後端重啟或重連後預覽狀態會掉，面板開著就重新要
     if (panel.open) ws.send({ type: 'preview', on: true });
   },
@@ -90,13 +106,7 @@ const ws = connectWS(defaultWsUrl(), {
 function onSkeleton(p: PlayerSkeleton | null): void {
   player = p;
   playerAt = clock();
-  if (!p) {
-    target = UPRIGHT_POSE;
-    return;
-  }
-  target = retarget(p, settings.torso_gain);
-  recent.push(target);
-  if (recent.length > FREEZE_FRAMES) recent.shift();
+  tracker.push(p, playerAt, settings.torso_gain);
 }
 
 // ---- UI ----
@@ -120,7 +130,7 @@ function enterUi(to: GameState): void {
   wind.setActive(to === 'POSING' || to === 'COUNTDOWN');
 
   if (to === 'ATTRACT') refreshBoard();
-  if (to === 'READY') recent = []; // 不讓上一位玩家的幀混進定格
+  if (to === 'READY') tracker.clear(); // 不讓上一位玩家的幀混進定格
   if (to === 'POSING') {
     hud.setLiveArea(null);
     nextLiveArea = 0;
@@ -146,7 +156,8 @@ function refreshBoard(): void {
 }
 
 function showResult(): void {
-  const r = freezeResult(recent, pose, measurer, baseline, settings);
+  // 一幀有效姿勢都沒有（整段軀幹被擋）時用畫面上的姿勢：hold 過後它已經緩回坐直
+  const r = freezeResult(tracker.recent, pose, measurer, baseline, settings);
   pose = r.pose;
   rider.setPose(pose);
   crank = FREEZE_CRANK_ANGLE;
@@ -209,8 +220,8 @@ function step(now: number, dt: number): void {
     if (a !== null) attract.setLiveArea(a);
     if (now >= nextBoard) refreshBoard();
   } else if (FOLLOW.includes(state)) {
-    // 關節不可見時 retarget 回坐直，approachPose（τ = 0.1 s）讓它約 0.3 秒內過渡過去
-    pose = approachPose(pose, fresh ? target : UPRIGHT_POSE, dt);
+    // 軀幹被擋時先保留上一個有效姿勢 0.3 秒，之後 approachPose（τ = 0.1 s）緩回坐直
+    pose = approachPose(pose, fresh ? tracker.target(now) : UPRIGHT_POSE, dt);
   } else if (state === 'MAINTENANCE') {
     pose = approachPose(pose, UPRIGHT_POSE, dt);
     if (maintReason !== maintText()) showMaintenance();

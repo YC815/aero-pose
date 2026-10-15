@@ -12,6 +12,7 @@ import binascii
 import contextlib
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -45,6 +46,8 @@ RESTART_DELAY_S = 2.0
 PREVIEW_INTERVAL_S = 0.1
 IDLE_SLEEP_S = 0.02  # step() 回 None 時的退讓，避免空轉
 QUEUE_SIZE = 4
+CAMERA_FRESH_S = 2.0  # 最後一幀在這麼久以內才算相機 ok
+WATCHDOG_S = 30.0  # 這麼久沒有任何成功的幀 → 結束行程，由 start.sh 的迴圈重啟（清掉卡死的 SDK 呼叫）
 _ID_RE = re.compile(r"^([0-9a-f]{10})\.png$")
 
 
@@ -129,14 +132,28 @@ class Hub:
 
 
 class CameraState:
-    """由 pipeline thread 寫、event loop 讀；都是單一賦值 / 單調遞增 int，GIL 下安全。"""
+    """由 pipeline thread 寫、event loop 讀；都是單一賦值 / 單調遞增 int，GIL 下安全。
+
+    相機狀態看「最後一幀多久以前」，不是瞬間旗標：step() 卡死會變 disconnected，單一空幀不會。
+    """
 
     def __init__(self) -> None:
-        self.camera = "disconnected"
+        self.last_frame_t: float | None = None  # time.monotonic()
         self.frames = 0
 
-    def status_msg(self, fps: float) -> dict:
-        return {"type": "status", "camera": self.camera, "fps": round(fps, 1)}
+    def camera(self, now: float) -> str:
+        t = self.last_frame_t
+        return "ok" if t is not None and now - t < CAMERA_FRESH_S else "disconnected"
+
+    def status_msg(self, fps: float, now: float | None = None) -> dict:
+        now = time.monotonic() if now is None else now
+        return {"type": "status", "camera": self.camera(now), "fps": round(fps, 1)}
+
+
+def _exit_for_restart() -> None:
+    """卡死的 SDK 呼叫救不回來，只能整個行程重來。os._exit 不等 daemon thread、不跑 atexit。"""
+    logging.shutdown()
+    os._exit(1)
 
 
 class PipelineRunner:
@@ -178,7 +195,6 @@ class PipelineRunner:
             except Exception:
                 log.exception("pipeline 例外，%.1f 秒後重建", RESTART_DELAY_S)
             finally:
-                self._state.camera = "disconnected"
                 self._close(pipeline)
             self._stop.wait(RESTART_DELAY_S)
 
@@ -187,10 +203,9 @@ class PipelineRunner:
         while not self._stop.is_set():
             r = pipeline.step()
             if r is None:
-                self._state.camera = "disconnected"
                 self._stop.wait(IDLE_SLEEP_S)
                 continue
-            self._state.camera = "ok"
+            self._state.last_frame_t = time.monotonic()
             self._state.frames += 1
             self._emit(r.skeleton)
             now = time.monotonic()
@@ -229,7 +244,11 @@ def create_app(
     data_dir: Path,
     port: int = 8000,
     uploader: Uploader | None = None,
+    *,
+    watchdog_s: float | None = None,
+    on_stall: Callable[[], None] = _exit_for_restart,
 ) -> FastAPI:
+    """watchdog_s：沒有成功幀多久就呼叫 on_stall（預設 WATCHDOG_S → 結束行程）。只在有 pipeline 時啟用。"""
     settings_store = SettingsStore(data_dir / "settings.json")
     store = ResultStore(data_dir)
     uploader = uploader or LocalUploader(port)
@@ -237,13 +256,21 @@ def create_app(
     state = CameraState()
 
     async def status_loop() -> None:
-        last_frames, last_t = state.frames, time.monotonic()
+        started = last_t = time.monotonic()
+        last_frames = state.frames
+        limit = WATCHDOG_S if watchdog_s is None else watchdog_s
+        stalled = False
         while True:
             await asyncio.sleep(STATUS_INTERVAL_S)
             now = time.monotonic()
             fps = (state.frames - last_frames) / max(now - last_t, 1e-6)
             last_frames, last_t = state.frames, now
-            hub.broadcast(state.status_msg(fps))
+            hub.broadcast(state.status_msg(fps, now))
+            ref = state.last_frame_t if state.last_frame_t is not None else started
+            if pipeline_factory is not None and not stalled and now - ref > limit:
+                stalled = True
+                log.critical("超過 %.0f 秒沒有任何成功的相機幀，結束行程讓 start.sh 重啟", limit)
+                on_stall()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):

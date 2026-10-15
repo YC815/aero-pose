@@ -3,6 +3,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { retarget } from '../src/retarget';
+import { PoseTracker } from '../src/tracker';
 import { UPRIGHT_POSE } from '../src/poses';
 import { alignMasks, createMeasurer, FREEZE_FRAMES, freezeResult } from '../src/scene';
 import { DEFAULT_SETTINGS, type PlayerSkeleton, type RiderPose } from '../src/types';
@@ -68,6 +69,46 @@ describe('整合：骨架 → 面積 → 瓦數', () => {
     const slow = freezeResult(fr, UPRIGHT_POSE, measurer, baseline, { ...DEFAULT_SETTINGS, speed_kmh: 20 });
     const fast = freezeResult(fr, UPRIGHT_POSE, measurer, baseline, { ...DEFAULT_SETTINGS, speed_kmh: 40 });
     expect(fast.watts / slow.watts).toBeCloseTo(8, 3);
+  });
+});
+
+describe('整合：軀幹被擋的幀（I3）', () => {
+  const gain = DEFAULT_SETTINGS.torso_gain;
+  const hipsHidden = (leanDeg: number): PlayerSkeleton => {
+    const sk = standingSkeleton({ leanDeg });
+    sk.visibility.left_hip = 0.3; // 深度前傾時髖部被身體擋住
+    sk.visibility.right_hip = 0.1;
+    return sk;
+  };
+
+  /** 模擬 COUNTDOWN 期間 30 fps 收骨架，倒數結束時定格（main.ts 的同一條路）。 */
+  function freezeAfterCountdown(feed: PlayerSkeleton[]) {
+    const tracker = new PoseTracker(FREEZE_FRAMES);
+    feed.forEach((sk, i) => tracker.push(sk, i / 30, gain));
+    return freezeResult(tracker.recent, UPRIGHT_POSE, measurer, baseline, DEFAULT_SETTINGS);
+  }
+
+  it('COUNTDOWN 中夾雜（甚至結尾連續）髖部被擋的幀，定格面積不變', () => {
+    const lean = standingSkeleton({ leanDeg: 50 });
+    const clean = freezeAfterCountdown(Array.from({ length: 30 }, () => lean));
+    const mixed = freezeAfterCountdown([
+      ...Array.from({ length: 30 }, (_, i) => (i % 3 === 0 ? hipsHidden(50) : lean)),
+      ...Array.from({ length: 8 }, () => hipsHidden(50)),
+    ]);
+    expect(mixed.areaM2).toBeCloseTo(clean.areaM2, 9);
+    expect(mixed.pose.torsoPitch).toBeCloseTo(clean.pose.torsoPitch, 9);
+
+    // 對照：舊做法（被擋 = 坐直、照樣進平均）面積會明顯變大
+    const legacy = Array.from({ length: FREEZE_FRAMES }, (_, i) =>
+      retarget(i % 3 === 0 ? hipsHidden(50) : lean, gain),
+    );
+    const old = freezeResult(legacy, UPRIGHT_POSE, measurer, baseline, DEFAULT_SETTINGS);
+    expect(old.areaM2).toBeGreaterThan(clean.areaM2 + 0.01);
+  });
+
+  it('整段軀幹都被擋 → 用 fallback（畫面上的姿勢）定格', () => {
+    const r = freezeAfterCountdown(Array.from({ length: 20 }, () => hipsHidden(50)));
+    expect(r.areaM2).toBeCloseTo(baseline.areaM2, 6);
   });
 });
 

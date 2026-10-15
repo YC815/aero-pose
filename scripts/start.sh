@@ -9,6 +9,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 AERO_SOURCE="${AERO_SOURCE:-orbbec}"
 AERO_SUDO="${AERO_SUDO:-0}"
 URL="http://localhost:8000"
+# root 迴圈的 $0，帶本腳本 PID 才唯一；cleanup 用它找回 root 迴圈（sudo 不一定轉送 TERM）
+LOOP_MARKER="aero-loop-$$"
 
 # 0. 參數檢查
 # 不用可能為空的陣列：macOS 內建 bash 3.2 在 set -u 下展開空陣列會報 unbound variable。
@@ -72,7 +74,7 @@ if [[ "$AERO_SUDO" == "1" ]]; then
   PRESERVE="$(env | sed -n 's/^\(AERO_[A-Za-z0-9_]*\)=.*/\1/p' | paste -sd, -)"
   PRESERVE="${PRESERVE:-AERO_SOURCE}"
   sudo --preserve-env="$PRESERVE" /usr/bin/env PYTHONDONTWRITEBYTECODE=1 \
-    /bin/bash -c "$ROOT_LOOP" aero-loop "$AERO_BIN" "${SERVE_ARGS[@]}" &
+    /bin/bash -c "$ROOT_LOOP" "$LOOP_MARKER" "$AERO_BIN" "${SERVE_ARGS[@]}" &
   LOOP_PID=$!
 
   # sudo 的密碼快取預設 5 分鐘；cleanup 要用 sudo 收掉 root 的迴圈，所以持續續期
@@ -98,9 +100,14 @@ cleanup() {
     kill "$KEEPALIVE_PID" 2>/dev/null || true
   fi
   if [[ "$AERO_SUDO" == "1" ]]; then
-    # LOOP_PID 是 root 的 sudo；sudo 會把 TERM 轉給 root 迴圈，迴圈再收掉 server
-    if ! sudo -n kill -TERM "$LOOP_PID" 2>/dev/null; then
-      echo "無法用 sudo 收掉後端，請手動執行：sudo pkill -f '.venv/bin/aero serve'" >&2
+    # LOOP_PID 是 root 的 sudo；sudo 通常會把 TERM 轉給 root 迴圈，迴圈再收掉 server
+    sudo -n kill -TERM "$LOOP_PID" 2>/dev/null || true
+    # 不靠 sudo 轉送：直接用標記找 root 迴圈送 TERM。[a] 讓 pattern 不會比對到 pkill / sudo 自己的命令列。
+    # pkill 回 1 = 沒有符合（迴圈已結束），不算錯。
+    pk=0
+    sudo -n pkill -TERM -f "[a]ero-loop-$$" 2>/dev/null || pk=$?
+    if [[ "$pk" -gt 1 ]] || ! sudo -n true 2>/dev/null; then
+      echo "無法用 sudo 收掉後端，請手動執行：sudo pkill -f '$LOOP_MARKER'; sudo pkill -f '.venv/bin/aero serve'" >&2
     fi
     # root 寫出來的 data/ 檔案改回目前使用者擁有
     sudo -n chown -R "$(id -u):$(id -g)" "${AERO_DATA_DIR:-$ROOT/data}" 2>/dev/null || true
@@ -110,6 +117,13 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+
+# 無人攤位：本腳本活著期間不准螢幕／系統休眠。-w：腳本結束（含被 kill）caffeinate 自己跟著結束，不用 cleanup。
+if command -v caffeinate >/dev/null 2>&1; then
+  caffeinate -dimsu -w $$ &
+else
+  echo "找不到 caffeinate（非 macOS？）：螢幕可能會休眠" >&2
+fi
 
 # 3. 等後端起來
 until curl -sf "$URL/api/settings" >/dev/null; do

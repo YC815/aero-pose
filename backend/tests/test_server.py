@@ -30,6 +30,8 @@ class StubUploader:
 def fast_timers(monkeypatch):
     monkeypatch.setattr(server, "STATUS_INTERVAL_S", 0.05)
     monkeypatch.setattr(server, "RESTART_DELAY_S", 0.05)
+    monkeypatch.setattr(server, "CAMERA_FRESH_S", 0.2)
+    monkeypatch.setattr(server, "WATCHDOG_S", 1e9)  # 測試絕不能真的 os._exit
     monkeypatch.setattr(server, "FRONTEND_DIST", server.Path("/nonexistent-dist"))
 
 
@@ -214,6 +216,88 @@ def test_status_ok_while_frames_flow(tmp_path):
     with client(tmp_path, factory=lambda gs: Endless()) as c, c.websocket_connect("/ws") as ws:
         st = recv_until(ws, lambda m: m["type"] == "status" and m["camera"] == "ok" and m["fps"] > 0)
         assert st["fps"] > 0
+
+
+def test_single_empty_frame_does_not_flip_camera_status(tmp_path):
+    """I2 情境 B：幀之間偶爾一個 None，狀態不能閃成 disconnected。"""
+
+    class Flaky:
+        def __init__(self):
+            self.n = 0
+
+        def step(self):
+            time.sleep(0.005)
+            self.n += 1
+            return None if self.n % 3 == 0 else fake_result()
+
+    with client(tmp_path, factory=lambda gs: Flaky()) as c, c.websocket_connect("/ws") as ws:
+        recv_until(ws, lambda m: m["type"] == "status" and m["camera"] == "ok")
+        cams = [recv_until(ws, lambda m: m["type"] == "status")["camera"] for _ in range(8)]
+        assert cams == ["ok"] * 8
+
+
+def _hung_factory(release: threading.Event):
+    class Hung:
+        def __init__(self):
+            self.n = 0
+
+        def step(self):
+            self.n += 1
+            if self.n == 1:
+                return fake_result()
+            release.wait(10)  # 模擬 SDK 呼叫卡死
+            return None
+
+    return lambda gs: Hung()
+
+
+def test_hung_step_reports_disconnected_and_triggers_watchdog(tmp_path):
+    """I2 情境 A：step() 卡死 → 2 秒（測試 0.2 秒）後相機狀態變 disconnected，watchdog 觸發 on_stall。"""
+    release = threading.Event()
+    stalls = []
+    app = create_app(
+        _hung_factory(release), tmp_path, uploader=StubUploader(), watchdog_s=0.5, on_stall=lambda: stalls.append(1)
+    )
+    try:
+        with TestClient(app) as c, c.websocket_connect("/ws") as ws:
+            recv_until(ws, lambda m: m["type"] == "status" and m["camera"] == "ok")
+            recv_until(ws, lambda m: m["type"] == "status" and m["camera"] == "disconnected")
+            deadline = time.time() + 3
+            while not stalls and time.time() < deadline:
+                time.sleep(0.02)
+            assert stalls == [1]
+            time.sleep(0.2)
+            assert stalls == [1]  # 只觸發一次
+    finally:
+        release.set()
+
+
+def test_watchdog_fires_when_no_frame_ever(tmp_path):
+    stalls = []
+    app = create_app(
+        lambda gs: FakePipeline(0), tmp_path, uploader=StubUploader(), watchdog_s=0.3, on_stall=lambda: stalls.append(1)
+    )
+    with TestClient(app):
+        deadline = time.time() + 3
+        while not stalls and time.time() < deadline:
+            time.sleep(0.02)
+    assert stalls == [1]
+
+
+def test_watchdog_quiet_while_frames_flow_and_without_pipeline(tmp_path):
+    class Endless:
+        def step(self):
+            time.sleep(0.005)
+            return fake_result()
+
+    stalls = []
+    with TestClient(
+        create_app(lambda gs: Endless(), tmp_path, uploader=StubUploader(), watchdog_s=0.3, on_stall=lambda: stalls.append(1))
+    ):
+        time.sleep(0.8)
+    with TestClient(create_app(None, tmp_path, uploader=StubUploader(), watchdog_s=0.1, on_stall=lambda: stalls.append(2))):
+        time.sleep(0.4)
+    assert stalls == []
 
 
 def test_pipeline_receives_live_settings(tmp_path):

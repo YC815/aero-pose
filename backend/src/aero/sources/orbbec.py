@@ -4,7 +4,9 @@ API 依據與來源見 docs/orbbec.md。重點：
 - color：優先 MJPG（SDK 對 Gemini336L 的預設即 1280x720@30 MJPG），轉成 RGB uint8。
 - depth：Y16，經 AlignFilter(COLOR_STREAM) 軟體 D2C 對齊到 color，再乘 get_depth_scale() (mm/單位) 轉公尺。
 - 內參：pipeline.get_camera_param().rgb_intrinsic（color 解析度）。
-- 斷線：wait_for_frames 丟例外、或超過 stall_s 沒有完整幀 → 視為斷線，read() 回 None，每 retry_s 秒重開 pipeline。
+- 斷線：wait_for_frames 丟例外、連續 MAX_FRAME_ERRORS 幀轉換失敗、或超過 stall_s 沒有完整幀
+  → 視為斷線，read() 回 None，每 retry_s 秒重開 pipeline。單一壞幀只丟掉那一幀。
+- 內參取不到時 read() 回 None（寧可顯示維修畫面，也不讓 lift3d 默默用 60° FOV 估計），每 intr_retry_s 秒重取。
 """
 
 from __future__ import annotations
@@ -30,6 +32,8 @@ DOC_PATH = REPO_ROOT / "docs" / "orbbec.md"
 WAIT_MS = 1000  # wait_for_frames timeout
 START_TIMEOUT_S = 20.0  # pipeline.start 逾時（macOS 沒 root 時社群回報會卡住）
 COLOR_ENV = "AERO_ORBBEC_COLOR"  # mjpg（預設）| rgb
+MAX_FRAME_ERRORS = 5  # 連續這麼多幀轉換失敗才當斷線重開
+INTR_RETRY_S = 2.0  # 內參取不到時的重試間隔
 
 
 class OrbbecSdkMissing(ImportError):
@@ -174,21 +178,24 @@ def _scaled(c: Any, w: int, h: int) -> Intrinsics:
     return Intrinsics(float(c.fx) * sx, float(c.fy) * sy, float(c.cx) * sx, float(c.cy) * sy, w, h)
 
 
-def read_intrinsics(pipeline: Any, color_frame: Any) -> Intrinsics | None:
+def read_intrinsics(pipeline: Any, color_frame: Any, verbose: bool = True) -> Intrinsics | None:
     """優先用 pipeline.get_camera_param().rgb_intrinsic，備援 stream profile 內參。
 
     解析度與 color 幀一致 → 直接用；長寬比相同 → 按比例縮放；長寬比不同 → 回 None（寧可沒有也不給錯的）。
+    verbose=False 時失敗不寫 log（重試期間避免洗版）。
     """
     h, w = color_frame.get_height(), color_frame.get_width()
     candidates = []
     try:
         candidates.append(pipeline.get_camera_param().rgb_intrinsic)
     except Exception as e:
-        log.warning("get_camera_param 失敗：%s", e)
+        if verbose:
+            log.warning("get_camera_param 失敗：%s", e)
     try:
         candidates.append(color_frame.get_stream_profile().as_video_stream_profile().get_intrinsic())
     except Exception as e:
-        log.warning("stream profile 內參取得失敗：%s", e)
+        if verbose:
+            log.warning("stream profile 內參取得失敗：%s", e)
     for c in candidates:
         if (int(c.width), int(c.height)) == (w, h):
             return Intrinsics(float(c.fx), float(c.fy), float(c.cx), float(c.cy), w, h)
@@ -197,7 +204,9 @@ def read_intrinsics(pipeline: Any, color_frame: Any) -> Intrinsics | None:
             log.warning("內參解析度 %sx%s 與 color 幀 %sx%s 不同，已按比例縮放", c.width, c.height, w, h)
             return _scaled(c, w, h)
     got = [f"{c.width}x{c.height}" for c in candidates] or ["無"]
-    log.error("取不到可用的 color 內參：color 幀 %sx%s，SDK 內參解析度 %s（長寬比不同，不能縮放）", w, h, got)
+    if verbose:
+        log.error("取不到可用的 color 內參：color 幀 %sx%s，SDK 內參解析度 %s（長寬比不同，不能縮放）", w, h, got
+        )
     return None
 
 
@@ -220,6 +229,8 @@ class OrbbecSource:
         stall_s: float = 3.0,
         start_timeout_s: float = START_TIMEOUT_S,
         color_format: str | None = None,
+        intr_retry_s: float = INTR_RETRY_S,
+        max_frame_errors: int = MAX_FRAME_ERRORS,
     ):
         self.width, self.height, self.fps = width, height, fps
         self._clock = clock
@@ -230,7 +241,11 @@ class OrbbecSource:
         self._color_pref = (color_format or color_preference()).lower()  # mjpg | rgb，見 AERO_ORBBEC_COLOR
         if self._color_pref not in ("mjpg", "rgb"):
             raise ValueError(f"color_format 只能是 mjpg 或 rgb，收到 {self._color_pref!r}")
-        self._intr_failed = False  # 內參取不到時只記錄一次，不要每幀洗版
+        self._intr_retry_s = intr_retry_s
+        self._max_frame_errors = max_frame_errors
+        self._intr_failing = False  # 這一輪失敗是否已記錄過（每個失敗期只記一次）
+        self._intr_next_try = float("-inf")
+        self._frame_errors = 0  # 連續轉換失敗的幀數
         self._pending: tuple[threading.Thread, Any] | None = None  # 逾時而仍卡在 start 裡的 (thread, pipeline)
         self.start_timed_out = False
         self._sdk: Any = None
@@ -264,15 +279,27 @@ class OrbbecSource:
                 return None
         try:
             frames = self._pipeline.wait_for_frames(WAIT_MS)
-            frame = self._to_frame(frames) if frames is not None else None
         except Exception as e:
             self._drop(f"讀取失敗：{e}")
             return None
+        try:
+            frame = self._to_frame(frames) if frames is not None else None
+            self._frame_errors = 0
+        except Exception as e:  # 單一壞幀（buffer 不完整、align 失敗）只丟這一幀
+            self._frame_errors += 1
+            if self._frame_errors >= self._max_frame_errors:
+                self._drop(f"連續 {self._frame_errors} 幀轉換失敗：{e}")
+                return None
+            log.warning("丟棄壞幀（連續第 %d 次）：%s", self._frame_errors, e)
+            frame = None
         now = self._clock()
         if frame is not None:
             self._last_ok = now
         elif now - self._last_ok > self._stall_s:
             self._drop(f"超過 {self._stall_s:g} 秒沒有完整幀")
+            return None
+        if frame is not None and frame.intrinsics is None:
+            return None  # 有幀但沒內參：當作沒有幀，不讓 lift3d 用估計值
         return frame
 
     # -- internals ---------------------------------------------------------
@@ -292,10 +319,27 @@ class OrbbecSource:
         depth_m = depth_to_meters(depth)
         if depth_m.shape != rgb.shape[:2]:  # 對齊後理應同尺寸；保險起見最近鄰縮放
             depth_m = cv2.resize(depth_m, (rgb.shape[1], rgb.shape[0]), interpolation=cv2.INTER_NEAREST)
-        if self._intrinsics is None and not self._intr_failed:
-            self._intrinsics = read_intrinsics(self._pipeline, color)
-            self._intr_failed = self._intrinsics is None
+        self._ensure_intrinsics(color)
         return Frame(rgb=rgb, depth_m=depth_m, intrinsics=self._intrinsics, ts=self._clock())
+
+    def _ensure_intrinsics(self, color: Any) -> None:
+        """內參取不到時每 intr_retry_s 秒重取；每個失敗期只寫一次 log。"""
+        if self._intrinsics is not None:
+            return
+        now = self._clock()
+        if now < self._intr_next_try:
+            return
+        self._intr_next_try = now + self._intr_retry_s
+        self._intrinsics = read_intrinsics(self._pipeline, color, verbose=not self._intr_failing)
+        if self._intrinsics is None:
+            if not self._intr_failing:
+                log.warning("color 內參取不到：每 %g 秒重試，期間不輸出幀（相機狀態會顯示未連線）", self._intr_retry_s)
+            self._intr_failing = True
+            self.last_error = "取不到 color 內參（get_camera_param / stream profile），重試中"
+        elif self._intr_failing:
+            log.info("color 內參已取得：fx=%.2f fy=%.2f", self._intrinsics.fx, self._intrinsics.fy)
+            self._intr_failing = False
+            self.last_error = None
 
     def _start_pipeline(self, pipeline: Any, config: Any) -> bool:
         """在 daemon thread 跑 pipeline.start。逾時回 False（thread 與 pipeline 留在 _pending）；失敗則重新丟出例外。"""
@@ -349,7 +393,9 @@ class OrbbecSource:
             return
         self._pipeline = pipeline
         self._intrinsics = None  # 每次重開都重取
-        self._intr_failed = False
+        self._intr_failing = False
+        self._intr_next_try = float("-inf")
+        self._frame_errors = 0
         self.start_timed_out = False
         self._last_ok = self._clock()
         self.last_error = None

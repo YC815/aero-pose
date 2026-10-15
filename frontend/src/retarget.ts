@@ -108,8 +108,19 @@ function arm(sk: PlayerSkeleton, frame: Frame, side: 'left' | 'right'): [Vec3, V
   return [u, f];
 }
 
+/** 雙肩、雙髖都可見，軀幹座標系才有意義。 */
+export function torsoVisible(sk: PlayerSkeleton): boolean {
+  return visible(sk, 'left_shoulder', 'right_shoulder', 'left_hip', 'right_hip');
+}
+
+/** 軀幹不可見時回 UPRIGHT_POSE 的副本（呼叫端分不出「真的坐直」和「看不到」時用 retargetVisible）。 */
 export function retarget(sk: PlayerSkeleton, torsoGain = 1.0): RiderPose {
-  if (!visible(sk, 'left_shoulder', 'right_shoulder', 'left_hip', 'right_hip')) return copyPose(UPRIGHT_POSE);
+  return retargetVisible(sk, torsoGain) ?? copyPose(UPRIGHT_POSE);
+}
+
+/** 軀幹不可見回 null：呼叫端應保留上一個有效姿勢，不能把它當成坐直。 */
+export function retargetVisible(sk: PlayerSkeleton, torsoGain = 1.0): RiderPose | null {
+  if (!torsoVisible(sk)) return null;
   const J = sk.joints;
 
   // 軀幹座標系

@@ -326,15 +326,90 @@ def test_intrinsics_scaled_when_same_aspect(world, clock):
     assert k.cx == pytest.approx(640.0) and k.cy == pytest.approx(360.0)
 
 
-def test_intrinsics_none_and_logged_once_when_aspect_differs(world, clock, caplog):
-    world.intr = Intr(width=1280, height=800)  # 16:10 vs 16:9
+def test_intrinsics_missing_yields_no_frame_and_logs_once(world, clock, caplog):
+    """I4：有 depth 但沒內參 → read() 回 None（不讓 lift3d 用 60° 估計）；整個失敗期只記一次 ERROR。"""
+    world.intr = Intr(width=1280, height=800)  # 16:10 vs 16:9，不能縮放
     src = make_source(clock)
     src.start()
     with caplog.at_level(logging.ERROR, logger="aero.orbbec"):
-        frames = [src.read() for _ in range(5)]
-    assert all(f is not None and f.intrinsics is None for f in frames)
+        frames = []
+        for _ in range(5):
+            frames.append(src.read())
+            clock.t += 1.0
+    assert frames == [None] * 5
+    assert src.connected  # 幀照常進來，不算斷線、不重開
+    assert world.starts == 1
     assert len([r for r in caplog.records if r.levelno == logging.ERROR]) == 1
-    assert world.camera_param_calls == 1  # 不是每幀都重取
+    assert "內參" in src.last_error
+
+
+def test_intrinsics_retried_every_2s_until_available(world, clock):
+    world.intr = Intr(width=1280, height=800)
+    src = make_source(clock)
+    src.start()
+    assert src.read() is None and world.camera_param_calls == 1
+    clock.t += 1.0
+    assert src.read() is None and world.camera_param_calls == 1  # 未滿 2 秒不重取
+    world.intr = Intr()  # SDK 恢復
+    clock.t += 1.0
+    f = src.read()
+    assert world.camera_param_calls == 2
+    assert f is not None and f.intrinsics is not None and f.intrinsics.fx == 900.0
+    assert src.last_error is None
+    src.read()
+    assert world.camera_param_calls == 2  # 取到之後不再每幀重取
+
+
+def test_intrinsics_new_failure_episode_logs_again_after_reopen(world, clock, caplog):
+    world.intr = Intr(width=1280, height=800)
+    src = make_source(clock)
+    src.start()
+    with caplog.at_level(logging.ERROR, logger="aero.orbbec"):
+        src.read()
+        world.script = [FakeOBError("unplugged")]
+        src.read()  # 斷線
+        clock.t += 2.0
+        src.read()  # 重開，新的失敗期
+    assert len([r for r in caplog.records if r.levelno == logging.ERROR and "內參" in r.getMessage()]) == 2
+
+
+def _corrupt_frameset(world):
+    """depth buffer 比宣告的尺寸短 → depth_to_meters reshape 丟例外。"""
+    good = world.default_frameset()
+    short = FakeDepth(world.w, world.h, np.zeros((10, 10), np.uint16), world.scale)
+    return FakeFrameSet(good.color, short)
+
+
+def test_single_corrupt_frame_is_skipped_without_reopen(world, clock):
+    """I2：單一壞幀只丟那一幀，不重開 pipeline。"""
+    src = make_source(clock)
+    src.start()
+    world.script = [_corrupt_frameset(world)]
+    assert src.read() is None
+    assert src.connected and world.stops == 0 and world.starts == 1
+    assert src.read() is not None  # 下一幀正常
+
+
+def test_consecutive_corrupt_frames_reopen_after_max(world, clock):
+    src = make_source(clock)
+    src.start()
+    world.script = [_corrupt_frameset(world) for _ in range(orbbec.MAX_FRAME_ERRORS)]
+    for _ in range(orbbec.MAX_FRAME_ERRORS - 1):
+        assert src.read() is None and src.connected
+    assert src.read() is None
+    assert not src.connected and world.stops == 1
+    clock.t += 2.0
+    assert src.read() is not None and world.starts == 2
+
+
+def test_corrupt_frame_counter_resets_on_good_frame(world, clock):
+    src = make_source(clock)
+    src.start()
+    bad = [_corrupt_frameset(world) for _ in range(orbbec.MAX_FRAME_ERRORS - 1)]
+    world.script = bad + [world.default_frameset()] + list(bad)
+    for _ in range(2 * (orbbec.MAX_FRAME_ERRORS - 1) + 1):
+        src.read()
+    assert src.connected and world.stops == 0
 
 
 def test_color_format_env_default_is_mjpg_and_rgb_switch(world, clock, monkeypatch):

@@ -108,8 +108,8 @@ class Frame:
 
 - `webcam`：OpenCV `VideoCapture(index)`，`depth_m=None`；intrinsics 用 60° 水平 FOV 估算。
 - `orbbec`：pyorbbecsdk（2.x），開 color 1280×720 與 depth stream，用 SDK 的 D2C 對齊把 depth 對到 color，單位轉成公尺。intrinsics 從 SDK 取 color 的內參。斷線時 `read()` 回傳 None，並每 2 秒嘗試重連。
-- `replay`：讀 `data/recordings/<name>/`，含 `meta.json`（intrinsics、fps）與 `frames/000123.npz`（`rgb` 為 JPEG bytes，`depth_mm` 為 uint16），可循環播放。
-- pyorbbecsdk 在 macOS 的安裝方式（PyPI wheel 或從 source build）在實作第一步確認，寫進 README。
+- `replay`：讀 `data/recordings/<name>/`，含 `meta.json`（intrinsics、fps）與 `frames/000123.npz`（`rgb_jpeg` 為 JPEG bytes，`depth_mm` 為 uint16，`ts`），可循環播放。
+- 套件為 `pyorbbecsdk2`（optional extra `orbbec`，有 macOS arm64 wheel）。macOS 上很可能要 root 才能開 UVC 裝置，詳見 `docs/orbbec.md`。
 
 ### 4.2 Pose → 3D
 

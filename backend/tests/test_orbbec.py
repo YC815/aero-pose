@@ -1,0 +1,380 @@
+"""OrbbecSource 與 doctor 的測試。以假的 pyorbbecsdk module 注入 sys.modules，不需要真機。
+
+假 SDK 的 API 形狀照 pyorbbecsdk2 2.1.2 內附的 pyorbbecsdk.pyi 與官方 examples 寫成（見 docs/orbbec.md）。
+"""
+
+from __future__ import annotations
+
+import enum
+import sys
+import types
+from dataclasses import dataclass, field
+
+import cv2
+import numpy as np
+import pytest
+
+from aero import doctor
+from aero.sources import orbbec
+from aero.sources.orbbec import OrbbecSdkMissing, OrbbecSource
+
+
+class FakeOBError(Exception):
+    pass
+
+
+class OBFormat(enum.Enum):
+    RGB = 1
+    BGR = 2
+    MJPG = 3
+    YUYV = 4
+    UYVY = 5
+    NV12 = 6
+    NV21 = 7
+    I420 = 8
+    Y16 = 9
+    UNKNOWN_FORMAT = 0
+
+
+class OBSensorType(enum.Enum):
+    COLOR_SENSOR = 2
+    DEPTH_SENSOR = 3
+
+
+class OBStreamType(enum.Enum):
+    COLOR_STREAM = 2
+    DEPTH_STREAM = 3
+
+
+class OBFrameAggregateOutputMode(enum.Enum):
+    FULL_FRAME_REQUIRE = 0
+
+
+class FakeColor:
+    def __init__(self, w, h, fmt, data: bytes):
+        self.w, self.h, self.fmt, self.data = w, h, fmt, data
+
+    def get_width(self): return self.w
+    def get_height(self): return self.h
+    def get_format(self): return self.fmt
+    def get_data(self): return self.data
+
+
+class FakeDepth:
+    def __init__(self, w, h, raw: np.ndarray, scale: float):
+        self.w, self.h, self.raw, self.scale = w, h, raw, scale
+
+    def get_width(self): return self.w
+    def get_height(self): return self.h
+    def get_data(self): return self.raw.tobytes()
+    def get_depth_scale(self): return self.scale
+
+
+class FakeFrameSet:
+    def __init__(self, color, depth):
+        self.color, self.depth = color, depth
+
+    def get_color_frame(self): return self.color
+    def get_depth_frame(self): return self.depth
+
+
+@dataclass
+class Intr:
+    fx: float = 900.0
+    fy: float = 901.0
+    cx: float = 640.0
+    cy: float = 360.0
+    width: int = 1280
+    height: int = 720
+
+
+@dataclass
+class World:
+    """假 SDK 的可操控狀態。"""
+
+    w: int = 1280
+    h: int = 720
+    color_fmt: OBFormat = OBFormat.RGB
+    raw_value: int = 2000
+    scale: float = 1.0
+    devices: int = 1
+    starts: int = 0
+    stops: int = 0
+    start_error: Exception | None = None
+    script: list = field(default_factory=list)  # 每次 wait_for_frames 依序取：Exception 就丟、None 回 None、否則回該 FrameSet
+    requested: list = field(default_factory=list)
+    intr: Intr = field(default_factory=Intr)
+
+    def default_frameset(self):
+        if self.color_fmt == OBFormat.MJPG:
+            img = np.full((self.h, self.w, 3), (10, 200, 30), np.uint8)  # BGR
+            data = cv2.imencode(".jpg", img)[1].tobytes()
+        else:
+            data = np.full((self.h, self.w, 3), (200, 100, 50), np.uint8).tobytes()
+        raw = np.full((self.h, self.w), self.raw_value, np.uint16)
+        return FakeFrameSet(
+            FakeColor(self.w, self.h, self.color_fmt, data), FakeDepth(self.w, self.h, raw, self.scale)
+        )
+
+
+def make_sdk(world: World) -> types.ModuleType:
+    m = types.ModuleType("pyorbbecsdk")
+    m.__file__ = "/fake/pyorbbecsdk/__init__.py"
+    m.OBError, m.OBFormat, m.OBSensorType = FakeOBError, OBFormat, OBSensorType
+    m.OBStreamType, m.OBFrameAggregateOutputMode = OBStreamType, OBFrameAggregateOutputMode
+    m.get_version = lambda: "9.9.9"
+
+    class ProfileList:
+        def get_video_stream_profile(self, w=0, h=0, fmt=OBFormat.UNKNOWN_FORMAT, fps=0):
+            world.requested.append((w, h, fmt, fps))
+            if fmt not in (OBFormat.RGB, OBFormat.MJPG, OBFormat.Y16, OBFormat.UNKNOWN_FORMAT):
+                raise FakeOBError("no such profile")
+            if fmt == OBFormat.UNKNOWN_FORMAT:
+                fmt = world.color_fmt
+            return f"profile({w}x{h},{fmt.name},{fps})"
+
+        def get_default_video_stream_profile(self): return "default-profile"
+        def __len__(self): return 0
+
+    class Config:
+        def enable_stream(self, p): pass
+        def set_frame_aggregate_output_mode(self, mode): pass
+
+    class Pipeline:
+        def __init__(self): pass
+        def get_stream_profile_list(self, sensor): return ProfileList()
+
+        def start(self, config=None):
+            world.starts += 1
+            if world.start_error:
+                raise world.start_error
+
+        def stop(self): world.stops += 1
+
+        def wait_for_frames(self, timeout_ms):
+            item = world.script.pop(0) if world.script else world.default_frameset()
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        def get_camera_param(self):
+            return types.SimpleNamespace(rgb_intrinsic=world.intr)
+
+    class AlignFilter:
+        def __init__(self, align_to_stream): assert align_to_stream == OBStreamType.COLOR_STREAM
+        def process(self, frames): return frames
+
+    class DeviceInfo:
+        def get_name(self): return "Orbbec Gemini 336L"
+        def get_serial_number(self): return "CP1234567"
+        def get_firmware_version(self): return "1.4.60"
+        def get_pid(self): return 0x0803
+        def get_connection_type(self): return "USB3.2"
+
+    class Device:
+        def get_device_info(self): return DeviceInfo()
+
+    class DeviceList:
+        def get_count(self): return world.devices
+        def get_device_by_index(self, i): return Device()
+
+    class Context:
+        def query_devices(self): return DeviceList()
+
+    m.Config, m.Pipeline, m.AlignFilter, m.Context = Config, Pipeline, AlignFilter, Context
+    return m
+
+
+class Clock:
+    def __init__(self): self.t = 100.0
+    def __call__(self): return self.t
+
+
+@pytest.fixture
+def world(monkeypatch):
+    w = World()
+    monkeypatch.setitem(sys.modules, "pyorbbecsdk", make_sdk(w))
+    return w
+
+
+@pytest.fixture
+def clock():
+    return Clock()
+
+
+def make_source(clock, **kw):
+    return OrbbecSource(clock=clock, sleep=lambda s: None, **kw)
+
+
+# -- 1. depth ---------------------------------------------------------------
+
+
+def test_depth_raw_2000_scale_1_is_2_meters(world, clock):
+    src = make_source(clock)
+    src.start()
+    f = src.read()
+    assert f is not None and f.depth_m is not None
+    assert f.depth_m.dtype == np.float32
+    assert f.depth_m.shape == (720, 1280)
+    assert np.all(f.depth_m == 2.0)
+
+
+def test_depth_scale_other_than_1_and_zero_stays_invalid(world, clock):
+    world.scale = 0.1  # 0.1 mm / 單位：20000 -> 2.0 m
+    world.raw_value = 20000
+    src = make_source(clock)
+    src.start()
+    assert np.allclose(src.read().depth_m, 2.0)
+    world.raw_value = 0
+    assert np.all(src.read().depth_m == 0.0)
+
+
+# -- 2. color ---------------------------------------------------------------
+
+
+def test_color_raw_rgb_shape_and_values(world, clock):
+    src = make_source(clock)
+    src.start()
+    f = src.read()
+    assert f.rgb.shape == (720, 1280, 3) and f.rgb.dtype == np.uint8
+    assert tuple(f.rgb[0, 0]) == (200, 100, 50)
+
+
+def test_color_mjpg_decoded_to_rgb_order(world, clock):
+    world.color_fmt = OBFormat.MJPG
+    src = make_source(clock)
+    src.start()
+    f = src.read()
+    assert f.rgb.shape == (720, 1280, 3)
+    r, g, b = (int(x) for x in f.rgb[360, 640])
+    assert g > r and g > b  # 來源 BGR=(10,200,30) -> RGB 的 G 最大
+
+
+def test_intrinsics_from_camera_param(world, clock):
+    src = make_source(clock)
+    src.start()
+    k = src.read().intrinsics
+    assert (k.fx, k.fy, k.cx, k.cy, k.width, k.height) == (900.0, 901.0, 640.0, 360.0, 1280, 720)
+
+
+def test_prefers_mjpg_at_requested_resolution(world, clock):
+    make_source(clock).start()
+    assert world.requested[0][:2] == (1280, 720) and world.requested[0][2] == OBFormat.MJPG
+
+
+# -- 3. 斷線 / 重連 -----------------------------------------------------------
+
+
+def test_wait_error_returns_none_then_restarts_after_2s(world, clock):
+    src = make_source(clock)
+    src.start()
+    assert world.starts == 1
+    world.script = [FakeOBError("device disconnected")]
+    assert src.read() is None
+    assert not src.connected and world.stops == 1
+    clock.t += 1.9
+    assert src.read() is None and world.starts == 1  # 還沒滿 2 秒
+    clock.t += 0.2
+    f = src.read()  # 滿 2 秒：重開並讀到幀
+    assert world.starts == 2 and f is not None
+
+
+def test_failed_reopen_retries_every_2s(world, clock):
+    src = make_source(clock)
+    src.start()
+    world.script = [FakeOBError("gone")]
+    src.read()
+    world.start_error = FakeOBError("still gone")
+    clock.t += 2.0
+    assert src.read() is None and world.starts == 2
+    clock.t += 1.0
+    assert src.read() is None and world.starts == 2
+    clock.t += 1.0
+    assert src.read() is None and world.starts == 3
+    world.start_error = None
+    clock.t += 2.0
+    assert src.read() is not None and world.starts == 4
+
+
+def test_stall_without_frames_counts_as_disconnect(world, clock):
+    src = make_source(clock, stall_s=3.0)
+    src.start()
+    world.script = [None]
+    clock.t += 1.0
+    assert src.read() is None and src.connected  # 單次逾時不算斷線
+    world.script = [None]
+    clock.t += 3.0
+    assert src.read() is None and not src.connected
+    clock.t += 2.0
+    assert src.read() is not None and world.starts == 2
+
+
+def test_start_failure_does_not_raise_and_reports_error(world, clock):
+    world.start_error = FakeOBError("uvc_open already opened")
+    src = make_source(clock)
+    src.start()
+    assert not src.connected and "uvc_open" in src.last_error
+    assert src.read() is None
+
+
+def test_missing_sdk_error_mentions_doc_path(monkeypatch, clock):
+    monkeypatch.setitem(sys.modules, "pyorbbecsdk", None)  # import 會丟 ImportError
+    with pytest.raises(OrbbecSdkMissing) as e:
+        make_source(clock).start()
+    assert "docs/orbbec.md" in str(e.value)
+
+
+def test_frame_source_protocol_attrs():
+    assert OrbbecSource.name == "orbbec" and OrbbecSource.has_depth is True
+
+
+# -- doctor -----------------------------------------------------------------
+
+
+@pytest.fixture
+def doctor_env(monkeypatch, tmp_path, world):
+    monkeypatch.setattr(doctor, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(doctor, "FPS_FRAMES", 60)
+    monkeypatch.setattr(orbbec, "macos_needs_sudo", lambda: False)
+    monkeypatch.setattr(doctor, "macos_needs_sudo", lambda: False)
+    return tmp_path
+
+
+def test_doctor_no_device_fails_cleanly_at_item_2(doctor_env, world, capsys):
+    world.devices = 0
+    assert doctor.run() == 1
+    out = capsys.readouterr().out
+    assert "[PASS] 1." in out
+    assert "[FAIL] 2. 列出裝置" in out
+    assert "USB 3" in out
+    assert "[SKIP] 3." in out and "[SKIP] 7." in out
+    assert "Traceback" not in out
+
+
+def test_doctor_all_pass_with_fake_camera(doctor_env, world, capsys):
+    assert doctor.run() == 0
+    out = capsys.readouterr().out
+    assert out.count("[PASS]") == 7 and "[FAIL]" not in out
+    assert "SN=CP1234567" in out and "fx=900.00" in out and "2.000 m" in out
+    png = cv2.imread(str(doctor_env / "doctor.png"))
+    assert png is not None and png.shape == (720, 1280, 3)
+
+
+def test_doctor_reports_open_failure_reason(doctor_env, world, capsys):
+    world.start_error = FakeOBError("uvc_open already opened")
+    assert doctor.run() == 1
+    out = capsys.readouterr().out
+    assert "[FAIL] 3." in out and "uvc_open already opened" in out and "[SKIP] 4." in out
+
+
+def test_doctor_fails_when_center_depth_invalid(doctor_env, world, capsys):
+    world.raw_value = 0
+    assert doctor.run() == 1
+    assert "[FAIL] 6." in capsys.readouterr().out
+
+
+def test_doctor_sdk_import_failure_is_item_1(monkeypatch, doctor_env, capsys):
+    monkeypatch.setitem(sys.modules, "pyorbbecsdk", None)
+    assert doctor.run() == 1
+    out = capsys.readouterr().out
+    assert "[FAIL] 1." in out and "orbbec.md" in out and "Traceback" not in out

@@ -6,8 +6,11 @@
 from __future__ import annotations
 
 import enum
+import logging
 import sys
+import threading
 import types
+import weakref
 from dataclasses import dataclass, field
 
 import cv2
@@ -48,6 +51,16 @@ class OBStreamType(enum.Enum):
 
 class OBFrameAggregateOutputMode(enum.Enum):
     FULL_FRAME_REQUIRE = 0
+
+
+class FakeProfile:
+    def __init__(self, w, h, fmt, fps):
+        self.w, self.h, self.fmt, self.fps = w, h, fmt, fps
+
+    def get_width(self): return self.w
+    def get_height(self): return self.h
+    def get_format(self): return self.fmt
+    def get_fps(self): return self.fps
 
 
 class FakeColor:
@@ -102,7 +115,13 @@ class World:
     stops: int = 0
     start_error: Exception | None = None
     script: list = field(default_factory=list)  # 每次 wait_for_frames 依序取：Exception 就丟、None 回 None、否則回該 FrameSet
-    requested: list = field(default_factory=list)
+    requested: list = field(default_factory=list)  # color 端 get_video_stream_profile 的呼叫
+    depth_searches: list = field(default_factory=list)  # depth（Y16）端的搜尋呼叫；預設 profile 命中時應為空
+    depth_default_fmt: OBFormat = OBFormat.Y16
+    block_next_start: threading.Event | None = None  # 下一次 pipeline.start 會卡到這個 event 被 set
+    ctx_refs: list = field(default_factory=list)
+    ctx_alive_at_start: bool | None = None
+    camera_param_calls: int = 0
     intr: Intr = field(default_factory=Intr)
 
     def default_frameset(self):
@@ -126,15 +145,21 @@ def make_sdk(world: World) -> types.ModuleType:
 
     class ProfileList:
         def get_video_stream_profile(self, w=0, h=0, fmt=OBFormat.UNKNOWN_FORMAT, fps=0):
+            if fmt == OBFormat.Y16:
+                world.depth_searches.append((w, h, fmt, fps))
+                return FakeProfile(1280, 800, OBFormat.Y16, fps or 30)  # 搜尋會挑到比預設大的解析度
             world.requested.append((w, h, fmt, fps))
-            if fmt not in (OBFormat.RGB, OBFormat.MJPG, OBFormat.Y16, OBFormat.UNKNOWN_FORMAT):
+            if fmt not in (OBFormat.RGB, OBFormat.MJPG, OBFormat.UNKNOWN_FORMAT):
                 raise FakeOBError("no such profile")
             if fmt == OBFormat.UNKNOWN_FORMAT:
                 fmt = world.color_fmt
-            return f"profile({w}x{h},{fmt.name},{fps})"
+            return FakeProfile(w, h, fmt, fps or 30)
 
-        def get_default_video_stream_profile(self): return "default-profile"
-        def __len__(self): return 0
+        def get_default_video_stream_profile(self):
+            return FakeProfile(848, 480, world.depth_default_fmt, 30)
+
+        def __len__(self): return 1
+        def __getitem__(self, i): return FakeProfile(1280, 720, OBFormat.MJPG, 30)
 
     class Config:
         def enable_stream(self, p): pass
@@ -146,6 +171,10 @@ def make_sdk(world: World) -> types.ModuleType:
 
         def start(self, config=None):
             world.starts += 1
+            world.ctx_alive_at_start = any(r() is not None for r in world.ctx_refs)
+            if world.block_next_start is not None:
+                ev, world.block_next_start = world.block_next_start, None
+                ev.wait(10)
             if world.start_error:
                 raise world.start_error
 
@@ -158,6 +187,7 @@ def make_sdk(world: World) -> types.ModuleType:
             return item
 
         def get_camera_param(self):
+            world.camera_param_calls += 1
             return types.SimpleNamespace(rgb_intrinsic=world.intr)
 
     class AlignFilter:
@@ -179,6 +209,7 @@ def make_sdk(world: World) -> types.ModuleType:
         def get_device_by_index(self, i): return Device()
 
     class Context:
+        def __init__(self): world.ctx_refs.append(weakref.ref(self))
         def query_devices(self): return DeviceList()
 
     m.Config, m.Pipeline, m.AlignFilter, m.Context = Config, Pipeline, AlignFilter, Context
@@ -260,6 +291,84 @@ def test_intrinsics_from_camera_param(world, clock):
 def test_prefers_mjpg_at_requested_resolution(world, clock):
     make_source(clock).start()
     assert world.requested[0][:2] == (1280, 720) and world.requested[0][2] == OBFormat.MJPG
+
+
+# -- fix round 1 ------------------------------------------------------------
+
+
+def test_depth_uses_sdk_default_profile_not_search(world, clock):
+    src = make_source(clock)
+    src.start()
+    assert world.depth_searches == []
+    assert src.profiles["depth"] == "848x480 Y16 @30fps"
+
+
+def test_depth_searches_only_when_default_is_not_y16(world, clock):
+    world.depth_default_fmt = OBFormat.UNKNOWN_FORMAT
+    src = make_source(clock)
+    src.start()
+    assert world.depth_searches and src.profiles["depth"] == "1280x800 Y16 @30fps"
+
+
+def test_profile_description_is_readable(world, clock):
+    src = make_source(clock)
+    src.start()
+    assert src.profiles["color"] == "1280x720 MJPG @30fps"
+
+
+def test_intrinsics_scaled_when_same_aspect(world, clock):
+    world.intr = Intr(fx=1350.0, fy=1351.5, cx=960.0, cy=540.0, width=1920, height=1080)
+    src = make_source(clock)
+    src.start()
+    k = src.read().intrinsics
+    assert (k.width, k.height) == (1280, 720)
+    assert k.fx == pytest.approx(900.0) and k.fy == pytest.approx(901.0)
+    assert k.cx == pytest.approx(640.0) and k.cy == pytest.approx(360.0)
+
+
+def test_intrinsics_none_and_logged_once_when_aspect_differs(world, clock, caplog):
+    world.intr = Intr(width=1280, height=800)  # 16:10 vs 16:9
+    src = make_source(clock)
+    src.start()
+    with caplog.at_level(logging.ERROR, logger="aero.orbbec"):
+        frames = [src.read() for _ in range(5)]
+    assert all(f is not None and f.intrinsics is None for f in frames)
+    assert len([r for r in caplog.records if r.levelno == logging.ERROR]) == 1
+    assert world.camera_param_calls == 1  # 不是每幀都重取
+
+
+def test_color_format_env_default_is_mjpg_and_rgb_switch(world, clock, monkeypatch):
+    make_source(clock).start()
+    assert world.requested[0][2] == OBFormat.MJPG
+    world.requested.clear()
+    monkeypatch.setenv("AERO_ORBBEC_COLOR", "rgb")
+    src = make_source(clock)
+    src.start()
+    assert world.requested[0][2] == OBFormat.RGB and src.profiles["color"] == "1280x720 RGB @30fps"
+
+
+def test_color_format_env_invalid_value_rejected(world, clock, monkeypatch):
+    monkeypatch.setenv("AERO_ORBBEC_COLOR", "h264")
+    with pytest.raises(ValueError):
+        make_source(clock)
+
+
+def test_start_timeout_does_not_block_and_read_retries(world, clock):
+    ev = threading.Event()
+    world.block_next_start = ev
+    src = make_source(clock, start_timeout_s=0.05)
+    src.start()  # 不會卡住
+    assert not src.connected and src.start_timed_out and "pipeline.start" in src.last_error
+    clock.t += 2.0
+    assert src.read() is None and world.starts == 1  # 舊的 start 還卡著，不再開第二個 pipeline
+    ev.set()  # 讓卡住的 start 返回
+    for t in threading.enumerate():
+        if t.name == "orbbec-start":
+            t.join(2)
+    clock.t += 2.0
+    assert src.read() is not None  # 重試成功
+    assert world.starts == 2 and world.stops == 1  # 舊 pipeline 被關掉
+    assert src.connected and not src.start_timed_out
 
 
 # -- 3. 斷線 / 重連 -----------------------------------------------------------
@@ -378,3 +487,8 @@ def test_doctor_sdk_import_failure_is_item_1(monkeypatch, doctor_env, capsys):
     assert doctor.run() == 1
     out = capsys.readouterr().out
     assert "[FAIL] 1." in out and "orbbec.md" in out and "Traceback" not in out
+
+
+def test_doctor_keeps_context_alive_until_pipeline_start(doctor_env, world):
+    assert doctor.run() == 0
+    assert world.ctx_alive_at_start is True

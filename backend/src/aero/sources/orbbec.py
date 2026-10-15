@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import threading
 import time
 from collections.abc import Callable
 from types import ModuleType
@@ -27,6 +28,8 @@ log = logging.getLogger("aero.orbbec")
 
 DOC_PATH = REPO_ROOT / "docs" / "orbbec.md"
 WAIT_MS = 1000  # wait_for_frames timeout
+START_TIMEOUT_S = 20.0  # pipeline.start 逾時（macOS 沒 root 時社群回報會卡住）
+COLOR_ENV = "AERO_ORBBEC_COLOR"  # mjpg（預設）| rgb
 
 
 class OrbbecSdkMissing(ImportError):
@@ -60,6 +63,15 @@ SUDO_HINT = (
 # --------------------------------------------------------------------------
 
 
+def describe_profile(p: Any) -> str:
+    """可讀的 profile 描述：1280x720 MJPG @30fps。取不到欄位就退回 str(p)。"""
+    try:
+        fmt = p.get_format()
+        return f"{p.get_width()}x{p.get_height()} {getattr(fmt, 'name', fmt)} @{p.get_fps()}fps"
+    except Exception:
+        return str(p)
+
+
 def _pick_profile(profile_list: Any, candidates: list[tuple[int, int, Any, int]]) -> Any:
     """依序嘗試 (w, h, format, fps)，0 表示不限。全部失敗就丟出含可用清單的錯誤。"""
     last: Exception | None = None
@@ -69,28 +81,48 @@ def _pick_profile(profile_list: Any, candidates: list[tuple[int, int, Any, int]]
         except Exception as e:  # SDK 找不到 profile 時丟 OBError
             last = e
     try:
-        available = [str(profile_list[i]) for i in range(len(profile_list))]
+        available = [describe_profile(profile_list[i]) for i in range(len(profile_list))]
     except Exception:
         available = []
     raise RuntimeError(f"找不到符合的 stream profile（{last}）。可用：{available}")
 
 
-def _color_candidates(sdk: Any, w: int, h: int, fps: int) -> list[tuple[int, int, Any, int]]:
-    fmts = [sdk.OBFormat.MJPG, sdk.OBFormat.RGB, sdk.OBFormat.YUYV, sdk.OBFormat.UNKNOWN_FORMAT]
+def color_preference() -> str:
+    pref = os.environ.get(COLOR_ENV, "mjpg").strip().lower()
+    if pref not in ("mjpg", "rgb"):
+        raise ValueError(f"{COLOR_ENV} 只能是 mjpg 或 rgb，收到 {pref!r}")
+    return pref
+
+
+def _color_candidates(sdk: Any, w: int, h: int, fps: int, pref: str = "mjpg") -> list[tuple[int, int, Any, int]]:
+    F = sdk.OBFormat
+    fmts = [F.MJPG, F.RGB] if pref == "mjpg" else [F.RGB, F.MJPG]
+    fmts += [F.YUYV, F.UNKNOWN_FORMAT]
     # 先要求指定 fps，找不到再放寬 fps
     return [(w, h, f, fps) for f in fmts] + [(w, h, f, 0) for f in fmts]
 
 
-def _build_config(sdk: Any, pipeline: Any, w: int, h: int, fps: int) -> tuple[Any, Any, Any]:
+def _pick_depth_profile(sdk: Any, depth_list: Any, fps: int) -> Any:
+    """先用 SDK 預設（336L 為 848x480 Y16；解析度小，軟體 D2C 才跑得動）；預設不是 Y16 才搜尋。"""
+    try:
+        default = depth_list.get_default_video_stream_profile()
+        if default.get_format() == sdk.OBFormat.Y16:
+            return default
+    except Exception as e:
+        log.warning("取不到預設 depth profile：%s", e)
+    try:
+        return _pick_profile(depth_list, [(0, 0, sdk.OBFormat.Y16, fps), (0, 0, sdk.OBFormat.Y16, 0)])
+    except RuntimeError:
+        return depth_list.get_default_video_stream_profile()
+
+
+def _build_config(sdk: Any, pipeline: Any, w: int, h: int, fps: int, pref: str = "mjpg") -> tuple[Any, Any, Any]:
     """回傳 (config, color_profile, depth_profile)。"""
     config = sdk.Config()
     color_list = pipeline.get_stream_profile_list(sdk.OBSensorType.COLOR_SENSOR)
-    color_profile = _pick_profile(color_list, _color_candidates(sdk, w, h, fps))
+    color_profile = _pick_profile(color_list, _color_candidates(sdk, w, h, fps, pref))
     depth_list = pipeline.get_stream_profile_list(sdk.OBSensorType.DEPTH_SENSOR)
-    try:
-        depth_profile = _pick_profile(depth_list, [(0, 0, sdk.OBFormat.Y16, fps), (0, 0, sdk.OBFormat.Y16, 0)])
-    except RuntimeError:
-        depth_profile = depth_list.get_default_video_stream_profile()
+    depth_profile = _pick_depth_profile(sdk, depth_list, fps)
     config.enable_stream(color_profile)
     config.enable_stream(depth_profile)
     # 每個 frameset 都要同時有 color + depth（官方 03_color_and_depth_aligned.py 的 SW 對齊寫法）
@@ -137,8 +169,16 @@ def depth_to_meters(frame: Any) -> np.ndarray:
     return (raw.astype(np.float32) * (float(frame.get_depth_scale()) / 1000.0)).astype(np.float32)
 
 
+def _scaled(c: Any, w: int, h: int) -> Intrinsics:
+    sx, sy = w / c.width, h / c.height
+    return Intrinsics(float(c.fx) * sx, float(c.fy) * sy, float(c.cx) * sx, float(c.cy) * sy, w, h)
+
+
 def read_intrinsics(pipeline: Any, color_frame: Any) -> Intrinsics | None:
-    """優先用 pipeline.get_camera_param().rgb_intrinsic；解析度和實際 color 不符時改試 stream profile 的內參。"""
+    """優先用 pipeline.get_camera_param().rgb_intrinsic，備援 stream profile 內參。
+
+    解析度與 color 幀一致 → 直接用；長寬比相同 → 按比例縮放；長寬比不同 → 回 None（寧可沒有也不給錯的）。
+    """
     h, w = color_frame.get_height(), color_frame.get_width()
     candidates = []
     try:
@@ -152,10 +192,12 @@ def read_intrinsics(pipeline: Any, color_frame: Any) -> Intrinsics | None:
     for c in candidates:
         if (int(c.width), int(c.height)) == (w, h):
             return Intrinsics(float(c.fx), float(c.fy), float(c.cx), float(c.cy), w, h)
-    if candidates:
-        c = candidates[0]
-        log.warning("內參解析度 %sx%s 與 color 幀 %sx%s 不符，3D 座標可能不準", c.width, c.height, w, h)
-        return Intrinsics(float(c.fx), float(c.fy), float(c.cx), float(c.cy), int(c.width), int(c.height))
+    for c in candidates:
+        if c.width > 0 and c.height > 0 and int(c.width) * h == int(c.height) * w:
+            log.warning("內參解析度 %sx%s 與 color 幀 %sx%s 不同，已按比例縮放", c.width, c.height, w, h)
+            return _scaled(c, w, h)
+    got = [f"{c.width}x{c.height}" for c in candidates] or ["無"]
+    log.error("取不到可用的 color 內參：color 幀 %sx%s，SDK 內參解析度 %s（長寬比不同，不能縮放）", w, h, got)
     return None
 
 
@@ -176,12 +218,21 @@ class OrbbecSource:
         sleep: Callable[[float], None] = time.sleep,
         retry_s: float = 2.0,
         stall_s: float = 3.0,
+        start_timeout_s: float = START_TIMEOUT_S,
+        color_format: str | None = None,
     ):
         self.width, self.height, self.fps = width, height, fps
         self._clock = clock
         self._sleep = sleep
         self._retry_s = retry_s
         self._stall_s = stall_s
+        self._start_timeout_s = start_timeout_s
+        self._color_pref = (color_format or color_preference()).lower()  # mjpg | rgb，見 AERO_ORBBEC_COLOR
+        if self._color_pref not in ("mjpg", "rgb"):
+            raise ValueError(f"color_format 只能是 mjpg 或 rgb，收到 {self._color_pref!r}")
+        self._intr_failed = False  # 內參取不到時只記錄一次，不要每幀洗版
+        self._pending: tuple[threading.Thread, Any] | None = None  # 逾時而仍卡在 start 裡的 (thread, pipeline)
+        self.start_timed_out = False
         self._sdk: Any = None
         self._pipeline: Any = None
         self._align: Any = None
@@ -241,18 +292,52 @@ class OrbbecSource:
         depth_m = depth_to_meters(depth)
         if depth_m.shape != rgb.shape[:2]:  # 對齊後理應同尺寸；保險起見最近鄰縮放
             depth_m = cv2.resize(depth_m, (rgb.shape[1], rgb.shape[0]), interpolation=cv2.INTER_NEAREST)
-        if self._intrinsics is None:
+        if self._intrinsics is None and not self._intr_failed:
             self._intrinsics = read_intrinsics(self._pipeline, color)
+            self._intr_failed = self._intrinsics is None
         return Frame(rgb=rgb, depth_m=depth_m, intrinsics=self._intrinsics, ts=self._clock())
+
+    def _start_pipeline(self, pipeline: Any, config: Any) -> bool:
+        """在 daemon thread 跑 pipeline.start。逾時回 False（thread 與 pipeline 留在 _pending）；失敗則重新丟出例外。"""
+        errors: list[BaseException] = []
+
+        def target() -> None:
+            try:
+                pipeline.start(config)
+            except BaseException as e:
+                errors.append(e)
+
+        t = threading.Thread(target=target, daemon=True, name="orbbec-start")
+        t.start()
+        t.join(self._start_timeout_s)
+        if t.is_alive():
+            self._pending = (t, pipeline)
+            return False
+        if errors:
+            raise errors[0]
+        return True
 
     def _try_open(self) -> None:
         self._last_attempt = self._clock()
+        if self._pending is not None:
+            thread, old = self._pending
+            if thread.is_alive():  # 上一次 start 還卡著，再開一個 pipeline 只會互搶相機
+                self.last_error = "上一次 pipeline.start 仍未返回，暫不重開"
+                return
+            self._pending = None
+            self._close_pipeline(old)  # start 後來才返回：關掉，免得它占著相機
         sdk = self._sdk
         pipeline = None
         try:
             pipeline = sdk.Pipeline()
-            config, color_p, depth_p = _build_config(sdk, pipeline, self.width, self.height, self.fps)
-            pipeline.start(config)
+            config, color_p, depth_p = _build_config(sdk, pipeline, self.width, self.height, self.fps, self._color_pref)
+            if not self._start_pipeline(pipeline, config):
+                self.start_timed_out = True
+                self.last_error = f"pipeline.start 超過 {self._start_timeout_s:g} 秒沒有回應"
+                if macos_needs_sudo():
+                    self.last_error += f"（{SUDO_HINT}）"
+                log.error("Orbbec 開啟失敗：%s", self.last_error)
+                return  # 不呼叫 stop：卡住的 pipeline 可能連 stop 也會卡
             self._align = sdk.AlignFilter(align_to_stream=sdk.OBStreamType.COLOR_STREAM)
         except Exception as e:
             self.last_error = str(e) or type(e).__name__
@@ -264,10 +349,12 @@ class OrbbecSource:
             return
         self._pipeline = pipeline
         self._intrinsics = None  # 每次重開都重取
+        self._intr_failed = False
+        self.start_timed_out = False
         self._last_ok = self._clock()
         self.last_error = None
-        self.profiles = {"color": str(color_p), "depth": str(depth_p)}
-        log.info("Orbbec 已開啟：color=%s depth=%s", color_p, depth_p)
+        self.profiles = {"color": describe_profile(color_p), "depth": describe_profile(depth_p)}
+        log.info("Orbbec 已開啟：color=%s depth=%s", self.profiles["color"], self.profiles["depth"])
 
     def _drop(self, reason: str) -> None:
         log.warning("Orbbec 斷線（%s），%g 秒後重試", reason, self._retry_s)

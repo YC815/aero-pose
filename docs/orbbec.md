@@ -43,10 +43,13 @@ macOS 的 `UVCAssistant` 常駐程式會獨佔所有 UVC 裝置，Orbbec 相機�
 
 ## 本專案的行為
 
-- 請求 color 1280x720@30，格式依序嘗試 MJPG、RGB、YUYV、任意；找不到再放寬 fps；全找不到時錯誤訊息列出裝置實際提供的 profile。depth 取 `Y16`，失敗則用預設 profile。
+- color：請求 1280x720@30，格式依序嘗試，找不到再放寬 fps；全找不到時錯誤訊息列出裝置實際提供的 profile（寬x高 格式 @fps）。預設順序 MJPG、RGB、YUYV、任意。
+  - **環境變數 `AERO_ORBBEC_COLOR=mjpg|rgb`（預設 `mjpg`）**：設成 `rgb` 則優先請求 RGB（官方軟體 D2C 範例用的是 RGB）。若 MJPG 搭配 AlignFilter 出現 depth 全 0 或對齊錯位，明天先改用 `AERO_ORBBEC_COLOR=rgb` 重跑 doctor（root 下記得帶變數：`sudo AERO_ORBBEC_COLOR=rgb backend/.venv/bin/python -m aero.doctor`）。
+- depth：先用 SDK 預設 profile（336L 預設 848x480@30 Y16，解析度小，軟體 D2C 才跑得動）；預設不是 Y16 才搜尋 Y16 profile。不主動搜尋，因為搜尋可能挑到 1280x800 而拖慢 fps。
 - 對齊後 depth 若尺寸與 color 不同，以最近鄰縮放到 color 尺寸。
-- 內參解析度若與實際 color 幀不符，退用 stream profile 的內參；仍不符則 log 警告。
-- 斷線判定：`wait_for_frames` 丟例外，或連續超過 3 秒沒有完整幀。之後 `read()` 回 `None`，每 2 秒關掉舊 pipeline 並重開新的。`start()` 開不了相機不會丟例外，原因在 `source.last_error`，由 `read()` 每 2 秒重試；SDK 匯入失敗才會丟 `OrbbecSdkMissing`。
+- 內參：解析度與 color 幀一致就直接用；長寬比相同就按比例縮放 fx/fy/cx/cy 並更新 width/height（log 警告）；長寬比不同則 `Frame.intrinsics = None` 並只記錄一次 error（不回傳錯的內參）。doctor 第 5 項會 FAIL。
+- 斷線判定：`wait_for_frames` 丟例外，或連續超過 3 秒沒有完整幀。之後 `read()` 回 `None`，每 2 秒關掉舊 pipeline 並重開新的。
+- `start()`：`pipeline.start` 包在 daemon thread，20 秒逾時。逾時不丟例外，`last_error` 與 `start_timed_out` 記錄原因，`read()` 之後每 2 秒重試；舊的 start 還沒返回時不會再開第二個 pipeline，返回後才關掉舊 pipeline 再重開。開相機失敗同樣只記錄在 `last_error`；只有 SDK 匯入失敗才丟 `OrbbecSdkMissing`。
 
 ## 診斷
 

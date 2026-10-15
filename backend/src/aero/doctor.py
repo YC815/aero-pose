@@ -11,7 +11,6 @@ import math
 import os
 import re
 import sys
-import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,12 +20,11 @@ import cv2
 import numpy as np
 
 from aero.config import DATA_DIR
-from aero.sources.orbbec import DOC_PATH, SUDO_HINT, OrbbecSdkMissing, OrbbecSource, load_sdk, macos_needs_sudo
+from aero.sources.orbbec import DOC_PATH, SUDO_HINT, START_TIMEOUT_S, OrbbecSdkMissing, OrbbecSource, load_sdk, macos_needs_sudo
 from aero.types import Frame
 
 FPS_FRAMES = 60
 FPS_TIMEOUT_S = 30.0
-OPEN_TIMEOUT_S = 20.0  # macOS 沒 sudo 時 pipeline.start 可能卡住（社群回報），不能讓 doctor 跟著卡死
 MIN_FPS_RATIO = 0.8
 CENTER_HALF = 10  # 21x21
 MIN_VALID_RATIO = 0.5
@@ -40,6 +38,7 @@ class Fail(Exception):
 @dataclass
 class Ctx:
     sdk: Any = None
+    device_ctx: Any = None  # sdk.Context：持有到 run() 結束，免得列舉用的 context 提早被釋放
     source: OrbbecSource | None = None
     frames: list[Frame] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -60,7 +59,8 @@ def _parse_version(s: str) -> tuple[int, ...] | None:
 
 
 def _check_devices(ctx: Ctx) -> str:
-    devices = ctx.sdk.Context().query_devices()
+    ctx.device_ctx = ctx.sdk.Context()
+    devices = ctx.device_ctx.query_devices()
     n = devices.get_count()
     if n == 0:
         hints = [
@@ -88,21 +88,13 @@ def _check_devices(ctx: Ctx) -> str:
     return "\n".join(lines)
 
 
-def _call_with_timeout(fn: Callable[[], None], timeout_s: float) -> bool:
-    """在 daemon thread 跑 fn；回傳是否在時限內結束。"""
-    t = threading.Thread(target=fn, daemon=True)
-    t.start()
-    t.join(timeout_s)
-    return not t.is_alive()
-
-
 def _check_open(ctx: Ctx) -> str:
     src = OrbbecSource()
     ctx.source = src
-    if not _call_with_timeout(src.start, OPEN_TIMEOUT_S):
-        ctx.hung = True
-        hint = f"\n{SUDO_HINT}" if macos_needs_sudo() else ""
-        raise Fail(f"pipeline.start 超過 {OPEN_TIMEOUT_S:g} 秒沒有回應（卡在 SDK 內部）。{hint}")
+    src.start()  # 內部對 pipeline.start 有逾時保護
+    if src.start_timed_out:
+        ctx.hung = True  # 卡住的 SDK thread 會擋住直譯器正常結束
+        raise Fail(src.last_error or f"pipeline.start 超過 {START_TIMEOUT_S:g} 秒沒有回應")
     if not src.connected:
         raise Fail(f"開啟 color + depth 失敗：{src.last_error}")
     return f"color={src.profiles['color']}\ndepth={src.profiles['depth']}"
@@ -145,7 +137,7 @@ def _check_intrinsics(ctx: Ctx) -> str:
     f = ctx.frames[-1]
     k = f.intrinsics
     if k is None:
-        raise Fail("Frame.intrinsics 是 None：get_camera_param / stream profile 都取不到 color 內參。")
+        raise Fail("Frame.intrinsics 是 None：get_camera_param / stream profile 取不到 color 內參，或其長寬比與 color 幀不同（不能縮放）。看上方 log。")
     h, w = f.rgb.shape[:2]
     if (k.width, k.height) != (w, h):
         raise Fail(f"內參解析度 {k.width}x{k.height} 與 color 影像 {w}x{h} 不符，反投影會錯。")

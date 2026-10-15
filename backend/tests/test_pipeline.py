@@ -138,3 +138,18 @@ def test_濾波生效_且換人時reset():
     x = r.skeleton["player"]["joints"]["left_hip"][0]
     raw_x = (320.0 + 170.0 + 57.0 * 0.7 - 320.0) / 600 * 2.0
     assert abs(x - raw_x) < 1e-6
+
+
+def test_選中者消失_重設濾波器():
+    det = FakeDetector([make_person(320.0)])
+    pipe = Pipeline(FakeSource(), det, lambda: Settings())
+    pipe.step()
+    det.persons = [make_person(320.0 + 30.0)]
+    pipe.step()
+    det.persons = []  # 玩家消失
+    assert pipe.step().skeleton["player"] is None
+    det.persons = [make_person(320.0 + 60.0)]  # 回來：中心離最後位置 < 0.4 m，但濾波器應已重設
+    r = pipe.step()
+    x = r.skeleton["player"]["joints"]["left_hip"][0]
+    raw_x = (320.0 + 60.0 + 57.0 * 0.7 - 320.0) / 600 * 2.0
+    assert abs(x - raw_x) < 1e-6

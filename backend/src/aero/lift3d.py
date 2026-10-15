@@ -27,6 +27,8 @@ def _sample_depth(depth: np.ndarray, u: float, v: float) -> float | None:
     """7x7 鄰域有效深度（>0）的中位數；沒有有效值回 None。"""
     h, w = depth.shape
     ui, vi = int(round(u)), int(round(v))
+    if not (0 <= ui < w and 0 <= vi < h):  # 中心在畫面外：沒有量測，交給 fallback
+        return None
     r = NEIGHBOURHOOD
     patch = depth[max(vi - r, 0) : min(vi + r + 1, h), max(ui - r, 0) : min(ui + r + 1, w)]
     valid = patch[patch > 0]

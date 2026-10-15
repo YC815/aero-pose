@@ -87,3 +87,38 @@ def test_estimate_intrinsics():
     assert k.cx == 640 and k.cy == 360 and k.width == 1280 and k.height == 720
     assert abs(k.fx - 640 / np.tan(np.radians(30))) < 1e-6
     assert k.fx == k.fy
+
+
+def test_sample_depth_畫面外回None():
+    from aero.lift3d import _sample_depth
+
+    d = np.full((480, 640), 2.0, np.float32)
+    d[:, 320:] = 3.0
+    for u, v in [(320, -10), (-10, 240), (320, -1), (-1, 240), (640, 240), (320, 480), (900, 900), (-500, -500)]:
+        assert _sample_depth(d, u, v) is None, (u, v)
+
+
+def test_sample_depth_邊界內clamp正確():
+    from aero.lift3d import _sample_depth
+
+    d = np.full((480, 640), 2.0, np.float32)
+    assert _sample_depth(d, 0, 0) == 2.0
+    assert _sample_depth(d, 639, 479) == 2.0
+
+
+def test_關節在畫面外_走fallback():
+    depth = np.full((480, 1280), 2.0, np.float32)
+    depth[:, 400:] = 3.0  # 若錯誤繞回取到大片區域，會得到 2.0/3.0 的混合值
+    world = {j: (0.0, 0.0, 0.0) for j in JOINTS}
+    world["left_wrist"] = (0.0, 0.0, -0.3)
+    px = _pixels(left_wrist=(320.0, -10.0))
+    out = lift_person(_person(px, world=world), _frame(depth))
+    assert abs(out["left_wrist"][2] - 1.7) < 1e-6
+
+
+def test_有深度圖但軀幹四點皆無效_走無深度路徑():
+    depth = np.zeros((480, 1280), np.float32)
+    px = _pixels(left_shoulder=(377.0, 200.0), right_shoulder=(263.0, 200.0))
+    out = lift_person(_person(px), _frame(depth))
+    # 肩寬 114 px、fx=600 -> d=2.0；world 全 0 -> 所有關節 z=2.0
+    np.testing.assert_allclose(out["left_hip"], (0, 0, 2.0), atol=1e-6)

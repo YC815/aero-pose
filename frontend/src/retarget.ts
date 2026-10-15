@@ -12,6 +12,8 @@ const TORSO_PITCH_MAX = 88 * deg;
 const TORSO_ROLL_MAX = 15 * deg;
 const TORSO_YAW_MAX = 20 * deg;
 const HEAD_PITCH_OFFSET = 30 * deg;
+/** 真人頭擺正時，耳中點→鼻在軀幹局部的俯仰（鼻子略低於耳朵，為負值）。 */
+export const HEAD_NEUTRAL_REL_PITCH = -14 * deg;
 const HEAD_PITCH_MIN = -40 * deg;
 const HEAD_PITCH_MAX = 70 * deg;
 const HEAD_YAW_MAX = 30 * deg;
@@ -34,6 +36,11 @@ const cross = (a: Vec3, b: Vec3): Vec3 => [
 ];
 const len = (a: Vec3): number => Math.hypot(a[0], a[1], a[2]);
 const clamp = (x: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, x));
+/** 把角度包到 (−π, π]。 */
+const wrapAngle = (a: number): number => {
+  const w = a - 2 * Math.PI * Math.floor((a + Math.PI) / (2 * Math.PI));
+  return w === -Math.PI ? Math.PI : w;
+};
 
 /** 正規化；長度趨近 0 時回 fallback。 */
 function norm(a: Vec3, fallback: Vec3): Vec3 {
@@ -115,14 +122,17 @@ export function retarget(sk: PlayerSkeleton, torsoGain = 1.0): RiderPose {
 
   const pitch = Math.atan2(-Y[2], Y[1]);
   const roll = Math.asin(clamp(Y[0], -1, 1));
-  const yaw = Math.atan2(-L[2], L[0]);
+  // 扭轉 = 肩線相對髖線（整個人斜站不算扭轉）
+  const H = sub(J.left_hip, J.right_hip);
+  const yaw = wrapAngle(Math.atan2(-L[2], L[0]) - Math.atan2(-H[2], H[0]));
 
   // 頭
   let headPitch = UPRIGHT_POSE.headPitch;
   let headYaw = UPRIGHT_POSE.headYaw;
   if (visible(sk, 'nose', 'left_ear', 'right_ear')) {
     const d = toLocal(frame, sub(J.nose, mid(J.left_ear, J.right_ear)));
-    headPitch = clamp(Math.atan2(d[1], -d[2]) + HEAD_PITCH_OFFSET, HEAD_PITCH_MIN, HEAD_PITCH_MAX);
+    const relPitch = Math.atan2(d[1], -d[2]);
+    headPitch = clamp(relPitch - HEAD_NEUTRAL_REL_PITCH + HEAD_PITCH_OFFSET, HEAD_PITCH_MIN, HEAD_PITCH_MAX);
     headYaw = clamp(Math.atan2(d[0], -d[2]), -HEAD_YAW_MAX, HEAD_YAW_MAX);
   }
 

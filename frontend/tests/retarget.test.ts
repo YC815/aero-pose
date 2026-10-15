@@ -1,10 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import { UPRIGHT_POSE } from '../src/poses';
-import { approachPose, averagePoses, lerpPose, retarget } from '../src/retarget';
-import type { RiderPose, Vec3 } from '../src/types';
+import { HEAD_NEUTRAL_REL_PITCH, approachPose, averagePoses, lerpPose, retarget } from '../src/retarget';
+import { JOINTS, type RiderPose, type Vec3 } from '../src/types';
 import { standingSkeleton } from './fixtures';
 
 const deg = Math.PI / 180;
+
+/** 繞通過 pivot 的垂直軸轉 a；a > 0 時 +x 側（本人左）往 −z（前方）移。 */
+function rotateY(p: Vec3, a: number, pivot: Vec3): Vec3 {
+  const dx = p[0] - pivot[0];
+  const dz = p[2] - pivot[2];
+  return [pivot[0] + dx * Math.cos(a) + dz * Math.sin(a), p[1], pivot[2] - dx * Math.sin(a) + dz * Math.cos(a)];
+}
 
 function expectVec(v: Vec3, e: Vec3, digits = 3) {
   for (let i = 0; i < 3; i++) expect(v[i]).toBeCloseTo(e[i], digits);
@@ -66,6 +73,20 @@ describe('retarget 軀幹', () => {
     sk.joints.right_shoulder[2] += 0.1;
     expect(retarget(sk).torsoYaw / deg).toBeCloseTo(20, 6);
   });
+  it('整個人（肩和髖一起）繞 y 轉 30° → yaw ≈ 0', () => {
+    const sk = standingSkeleton();
+    for (const j of JOINTS) sk.joints[j] = rotateY(sk.joints[j], 30 * deg, [0, 0, 2.0]);
+    const p = retarget(sk);
+    expect(p.torsoYaw / deg).toBeCloseTo(0, 6);
+    expect(p.torsoPitch / deg).toBeCloseTo(30, 6);
+  });
+  it('只有肩轉 15°（左肩往前）→ yaw ≈ 15°', () => {
+    const sk = standingSkeleton();
+    for (const j of ['left_shoulder', 'right_shoulder'] as const) {
+      sk.joints[j] = rotateY(sk.joints[j], 15 * deg, [0, 0, 2.0]);
+    }
+    expect(retarget(sk).torsoYaw / deg).toBeCloseTo(15, 6);
+  });
   it('軀幹不可見 → 整個回傳 UPRIGHT_POSE', () => {
     const sk = standingSkeleton({ leanDeg: 45 });
     sk.visibility.left_hip = 0.2;
@@ -81,9 +102,16 @@ describe('retarget 頭', () => {
     sk.joints.nose[0] = 0.2;
     expect(retarget(sk).headYaw / deg).toBeCloseTo(30, 6);
   });
-  it('headPitch = 相對俯仰 + 30°', () => {
+  it('標準站姿頭擺正 → headPitch ≈ UPRIGHT_POSE.headPitch（±3°）', () => {
     const p = retarget(standingSkeleton());
-    expect(p.headPitch / deg).toBeCloseTo(Math.atan2(-0.02, 0.08) / deg + 30, 3);
+    expect(Math.abs(p.headPitch - UPRIGHT_POSE.headPitch) / deg).toBeLessThan(3);
+  });
+  it('headPitch = 相對俯仰 − 中立俯仰 + 30°', () => {
+    const sk = standingSkeleton();
+    sk.joints.nose[1] = 1.69; // 抬下巴
+    const p = retarget(sk);
+    const rel = Math.atan2(0.02, 0.08);
+    expect(p.headPitch).toBeCloseTo(rel - HEAD_NEUTRAL_REL_PITCH + 30 * deg, 6);
   });
   it('鼻子不可見 → 頭回 UPRIGHT 值', () => {
     const sk = standingSkeleton();

@@ -71,3 +71,14 @@ def test_corrupt_line_is_skipped(tmp_path):
     with (tmp_path / "results.jsonl").open("a") as f:
         f.write("{broken\n")
     assert len(ResultStore(tmp_path).top("2026-10-15")) == 1
+
+
+def test_partial_last_line_does_not_eat_next_entry(tmp_path):
+    s = ResultStore(tmp_path)
+    s.add(0.4, 0.5, 1.0, PNG, now=at(15))
+    with (tmp_path / "results.jsonl").open("a") as f:
+        f.write('{"id": "half')  # 斷電殘留：沒換行的半行
+    s.add(0.3, 0.5, 1.0, PNG, now=at(15, 11))
+    reopened = ResultStore(tmp_path)
+    top = reopened.top("2026-10-15")
+    assert [e["area_m2"] for e in top] == [0.3, 0.4]  # 半行被跳過，新資料完整

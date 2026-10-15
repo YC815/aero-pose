@@ -54,9 +54,22 @@ class ResultStore:
             self._png_dir.mkdir(parents=True, exist_ok=True)
             self.png_path(entry["id"]).write_bytes(png)
             with self._jsonl.open("a") as f:
+                if self._needs_newline():
+                    f.write("\n")  # 斷電殘留的半行不能吃掉下一筆
                 f.write(json.dumps(entry) + "\n")
             self._entries.append(entry)
         return entry
+
+    def _needs_newline(self) -> bool:
+        try:
+            with self._jsonl.open("rb") as f:
+                f.seek(0, 2)
+                if f.tell() == 0:
+                    return False
+                f.seek(-1, 2)
+                return f.read(1) != b"\n"
+        except FileNotFoundError:
+            return False
 
     def _day_sorted(self, date: str) -> list[dict]:
         day = [e for e in self._entries if e["date"] == date]

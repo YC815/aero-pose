@@ -58,7 +58,22 @@ class SettingsStore:
     def __init__(self, path: Path):
         self._path = path
         self._lock = threading.Lock()
-        self._settings = load_settings(path)
+        self._settings = self._load(path)
+
+    @staticmethod
+    def _load(path: Path) -> Settings:
+        """壞檔不能讓無人攤位 crash-loop：改名備份、用預設值。"""
+        try:
+            return load_settings(path)
+        except (ValueError, TypeError, AttributeError, OSError):  # JSON 壞、非 dict、值無法轉 float
+            log.exception("settings.json 無法讀取，改用預設值")
+        bad = path.with_name(f"{path.name}.bad-{int(time.time())}")
+        try:
+            path.replace(bad)
+            log.warning("壞檔已改名為 %s", bad)
+        except OSError:
+            log.exception("壞檔改名失敗")
+        return Settings()
 
     def get(self) -> Settings:
         with self._lock:

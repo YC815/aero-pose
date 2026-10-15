@@ -389,3 +389,14 @@ def test_cli_parser():
     a = p.parse_args(["record", "--source", "orbbec", "--name", "x"])
     assert a.seconds == 20
     assert p.parse_args(["doctor"]).cmd == "doctor"
+
+
+@pytest.mark.parametrize("content", ["{broken", "[1, 2]", '{"cd": "abc"}', ""])
+def test_corrupt_settings_file_falls_back_to_defaults(tmp_path, content):
+    (tmp_path / "settings.json").write_text(content)
+    with client(tmp_path) as c:
+        assert c.get("/api/settings").json() == settings_to_dict(Settings())
+        assert c.put("/api/settings", json=settings_to_dict(Settings(cd=0.5))).status_code == 200
+    bad = list(tmp_path.glob("settings.json.bad-*"))
+    assert len(bad) == 1 and bad[0].read_text() == content
+    assert (tmp_path / "settings.json").exists()  # PUT 後重新寫出好檔

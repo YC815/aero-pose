@@ -43,10 +43,13 @@ class ReplaySource:
             self._ts_offset += self._last_ts - (self._ts0 or 0.0) + 1.0 / self._fps
             self._i = 0
 
-        with np.load(self._files[self._i]) as z:
+        path = self._files[self._i]
+        with np.load(path) as z:
             ts = float(z["ts"])
             rgb_bgr = cv2.imdecode(z["rgb_jpeg"], cv2.IMREAD_COLOR)
             depth_mm = z["depth_mm"] if "depth_mm" in z.files else None
+        if rgb_bgr is None:
+            raise ValueError(f"無法解碼 JPEG：{path}")
         self._i += 1
 
         if self._ts0 is None:

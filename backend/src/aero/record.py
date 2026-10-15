@@ -21,7 +21,6 @@ def record(source: FrameSource, out_dir: Path, seconds: float) -> int:
     n = 0
     first_ts = last_ts = 0.0
     intrinsics = None
-    has_depth = False
     t_end = time.monotonic() + seconds
     next_report = time.monotonic() + 1.0
 
@@ -38,7 +37,6 @@ def record(source: FrameSource, out_dir: Path, seconds: float) -> int:
         data: dict[str, np.ndarray | float] = {"rgb_jpeg": buf.reshape(-1), "ts": float(frame.ts)}
         if frame.depth_m is not None:
             data["depth_mm"] = (frame.depth_m * 1000).astype(np.uint16)
-            has_depth = True
         np.savez(frames_dir / f"{n:06d}.npz", **data)
 
         if n == 0:
@@ -50,10 +48,13 @@ def record(source: FrameSource, out_dir: Path, seconds: float) -> int:
             print(f"錄製中：{n} 幀，剩 {max(0.0, t_end - time.monotonic()):.1f} 秒")
             next_report += 1.0
 
+    if n == 0:
+        raise RuntimeError(f"錄製失敗：{seconds} 秒內沒有收到任何幀（{source.name}），未寫入 meta.json")
+
     fps = (n - 1) / (last_ts - first_ts) if n > 1 and last_ts > first_ts else 30.0
     meta = {
         "fps": fps,
-        "has_depth": has_depth,
+        "has_depth": bool(source.has_depth),
         "intrinsics": asdict(intrinsics) if intrinsics else None,
     }
     (out_dir / "meta.json").write_text(json.dumps(meta, indent=2))

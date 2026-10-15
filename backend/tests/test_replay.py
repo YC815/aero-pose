@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from aero.record import record
 from aero.sources.replay import ReplaySource
@@ -100,3 +101,20 @@ def test_realtime_sleeps(tmp_path: Path):
     for _ in range(3):
         assert src.read() is not None
     assert time.monotonic() - t0 >= 0.015  # 錄的間隔 0.01 s × 2
+
+
+def test_record_zero_frames_raises_and_writes_no_meta(tmp_path: Path):
+    out = tmp_path / "empty"
+    with pytest.raises(RuntimeError, match="沒有收到任何幀"):
+        record(FakeSource(n=0), out, seconds=0.1)
+    assert not (out / "meta.json").exists()
+
+
+def test_replay_corrupt_jpeg_names_file(tmp_path: Path):
+    out = _record(tmp_path)
+    bad = out / "frames" / "000000.npz"
+    np.savez(bad, rgb_jpeg=np.zeros(10, dtype=np.uint8), ts=100.0)
+    src = ReplaySource(out, loop=False, realtime=False)
+    src.start()
+    with pytest.raises(ValueError, match="000000.npz"):
+        src.read()

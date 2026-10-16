@@ -27,7 +27,7 @@
 ## 2. 專案結構
 
 ```
-whosmoreareo/
+aero-pose/
   backend/
     pyproject.toml
     src/aero/

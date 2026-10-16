@@ -1,4 +1,4 @@
-# 風阻姿勢大挑戰
+# 風阻姿勢大挑戰（aero-pose）
 
 無人顧的攤位遊戲。玩法：
 
@@ -138,3 +138,7 @@ cd frontend && pnpm test && pnpm build
 ```
 
 前端開發：後端照常跑在 8000，另開 `cd frontend && pnpm dev`（Vite 會把 `/api`、`/ws`、`/r` 代理到 8000）。
+
+## 授權
+
+[MIT](LICENSE)

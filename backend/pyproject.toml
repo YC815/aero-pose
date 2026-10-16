@@ -1,7 +1,8 @@
 [project]
 name = "aero"
 version = "0.1.0"
-description = "Add your description here"
+description = "風阻姿勢大挑戰：深度相機＋姿勢辨識，量騎車姿勢的迎風面積與省下的瓦數"
+license = "MIT"
 readme = "README.md"
 authors = [
     { name = "YC815", email = "yushun@chen.zone" }

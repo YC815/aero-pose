@@ -23,10 +23,8 @@ class Settings:
     filter_min_cutoff: float = 1.0
     filter_beta: float = 0.05
     start_hold_s: float = 1.0
-    stillness_speed_mps: float = 0.15
-    stillness_hold_s: float = 1.5
-    posing_max_s: float = 20
     countdown_s: float = 3
+    record_s: float = 10
     result_s: float = 12
     lost_timeout_s: float = 3
     torso_gain: float = 1.0

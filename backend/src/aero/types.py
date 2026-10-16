@@ -61,6 +61,7 @@ class PersonPose:
     pixels: dict[str, tuple[float, float]]  # (u, v) in rgb pixel coords
     world: dict[str, tuple[float, float, float]]  # MediaPipe world landmarks: hip-centred metres, x image-right, y down, z away from camera is positive
     visibility: dict[str, float]  # 0..1
+    mask: np.ndarray | None = None  # HxW float32 0..1 person segmentation at rgb resolution (raw camera orientation)
 
 
 @dataclass
@@ -69,4 +70,5 @@ class StepResult:
 
     skeleton: dict  # the {"type": "skeleton", ...} WS message (spec §4.5)
     frame: Frame
-    persons: list[dict] = field(default_factory=list)  # [{"bbox": [x0,y0,x1,y1], "selected": bool, "distance_m": float, "pixels": {joint: [u,v]}}]
+    persons: list[dict] = field(default_factory=list)
+    selected_mask: np.ndarray | None = None  # segmentation mask of the selected player (PersonPose.mask), or None  # [{"bbox": [x0,y0,x1,y1], "selected": bool, "distance_m": float, "pixels": {joint: [u,v]}}]

@@ -50,7 +50,22 @@ export interface PreviewMsg {
   jpeg_b64: string;
   persons: PreviewPerson[];
 }
-export type ServerMsg = SkeletonMsg | StatusMsg | SettingsMsg | PreviewMsg;
+/**
+ * Live camera frame for the full-screen camera view (v1.1). Sent to every client at <= 20 fps.
+ * Both image and mask are in RAW camera orientation (not mirrored); the frontend mirrors on display.
+ */
+export interface FrameMsg {
+  type: 'frame';
+  ts: number;
+  jpeg_b64: string; // JPEG, width 960, height by camera aspect
+  width: number;
+  height: number;
+  /** Selected player's segmentation mask, 1 byte per pixel (0 or 255), row-major, row 0 = top; null if no player. */
+  mask_b64: string | null;
+  mask_w: number; // 192
+  mask_h: number; // round(192 * height / width)
+}
+export type ServerMsg = SkeletonMsg | StatusMsg | SettingsMsg | PreviewMsg | FrameMsg;
 // Client -> server over /ws
 export interface PreviewToggle {
   type: 'preview';
@@ -67,10 +82,8 @@ export interface Settings {
   filter_min_cutoff: number;
   filter_beta: number;
   start_hold_s: number;
-  stillness_speed_mps: number;
-  stillness_hold_s: number;
-  posing_max_s: number;
   countdown_s: number;
+  record_s: number;
   result_s: number;
   lost_timeout_s: number;
   torso_gain: number;
@@ -89,10 +102,8 @@ export const DEFAULT_SETTINGS: Settings = {
   filter_min_cutoff: 1.0,
   filter_beta: 0.05,
   start_hold_s: 1.0,
-  stillness_speed_mps: 0.15,
-  stillness_hold_s: 1.5,
-  posing_max_s: 20,
   countdown_s: 3,
+  record_s: 10,
   result_s: 12,
   lost_timeout_s: 3,
   torso_gain: 1.0,
@@ -141,4 +152,22 @@ export interface RiderPose {
   rightForearm: Vec3;
 }
 
-export type GameState = 'ATTRACT' | 'READY' | 'POSING' | 'COUNTDOWN' | 'RESULT' | 'MAINTENANCE';
+export type GameState = 'ATTRACT' | 'COUNTDOWN' | 'RECORDING' | 'RESULT' | 'MAINTENANCE';
+
+/** One scoring sample during RECORDING (every 0.1 s). */
+export interface SessionSample {
+  t: number; // seconds since RECORDING started
+  areaM2: number; // standard rider frontal area for the pose at t
+  watts: number; // watts saved vs upright baseline at speed_kmh (negative = worse than upright)
+}
+/** Everything the result screen / card / leaderboard need about one 10 s recording. */
+export interface SessionSummary {
+  samples: SessionSample[];
+  poses: { t: number; pose: RiderPose }[]; // every retargeted pose received, for the replay
+  baselineM2: number;
+  meanAreaM2: number; // score basis sent as area_m2
+  meanWatts: number; // the headline score, sent as watts_saved
+  pct: number; // (baselineM2 - meanAreaM2) / baselineM2 * 100
+  bestIndex: number; // index into samples with the lowest areaM2
+  durationS: number;
+}

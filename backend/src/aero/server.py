@@ -3,6 +3,7 @@
 thread → asyncio 的交接只有一條路：loop.call_soon_threadsafe(hub.broadcast / hub.broadcast_frame, msg)。
 Hub 的所有狀態只在 event loop thread 內改動；pipeline thread 只讀 preview_count / client_count（int）。
 JPEG 編碼等 render 成本都在 pipeline thread 做，event loop 只負責轉送。
+frame 是二進位訊息（preview.pack_frame），其他訊息都是 JSON。
 """
 
 from __future__ import annotations
@@ -37,6 +38,7 @@ from aero.config import (
     settings_from_dict,
     settings_to_dict,
 )
+from aero.perf import PERF
 from aero.results import ResultStore
 from aero.uploader import LocalUploader, Uploader
 
@@ -45,7 +47,7 @@ log = logging.getLogger(__name__)
 STATUS_INTERVAL_S = 1.0
 RESTART_DELAY_S = 2.0
 PREVIEW_INTERVAL_S = 0.1
-FRAME_INTERVAL_S = 0.05  # frame 串流上限 20 fps
+FRAME_INTERVAL_S = 1 / 30  # frame 串流上限 30 fps（= 相機幀率；編碼一張約 2 ms）
 IDLE_SLEEP_S = 0.02  # step() 回 None 時的退讓，避免空轉
 QUEUE_SIZE = 4
 CAMERA_FRESH_S = 2.0  # 最後一幀在這麼久以內才算相機 ok
@@ -59,7 +61,7 @@ def _render_preview(r: Any) -> dict:
     return render_preview(r)
 
 
-def _render_frame(r: Any) -> dict:
+def _render_frame(r: Any) -> bytes:
     from aero.preview import render_frame
 
     return render_frame(r)
@@ -99,13 +101,13 @@ class SettingsStore:
 class Conn:
     """每個 client 兩個出口：
     - queue：有界的控制訊息（skeleton / status / settings / preview），滿了丟最舊的。
-    - frame：單一槽位，只留最新的 frame。frame 很大又很多，不能跟控制訊息搶 queue。
+    - frame：單一槽位，只留最新的 frame（二進位）。frame 很大又很多，不能跟控制訊息搶 queue。
     next() 永遠先出控制訊息，所以慢 client 也收得到 status / settings。
     """
 
     def __init__(self) -> None:
         self.queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=QUEUE_SIZE)
-        self.frame: dict | None = None
+        self.frame: bytes | None = None
         self.preview = False
         self._wake = asyncio.Event()
 
@@ -116,11 +118,11 @@ class Conn:
         self.queue.put_nowait(msg)
         self._wake.set()
 
-    def put_frame(self, msg: dict) -> None:
+    def put_frame(self, msg: bytes) -> None:
         self.frame = msg  # 覆寫：舊 frame 直接丟
         self._wake.set()
 
-    async def next(self) -> dict:
+    async def next(self) -> dict | bytes:
         while True:
             if not self.queue.empty():
                 return self.queue.get_nowait()
@@ -164,7 +166,7 @@ class Hub:
                 continue
             c.put(msg)
 
-    def broadcast_frame(self, msg: dict) -> None:
+    def broadcast_frame(self, msg: bytes) -> None:
         for c in self._conns:
             c.put_frame(msg)
 
@@ -243,7 +245,7 @@ class PipelineRunner:
                 self._close(pipeline)
             self._stop.wait(RESTART_DELAY_S)
 
-    def _emit_frame(self, msg: dict) -> None:
+    def _emit_frame(self, msg: bytes) -> None:
         try:
             self._loop.call_soon_threadsafe(self._hub.broadcast_frame, msg)
         except RuntimeError:  # loop 已關閉（shutdown 競態）
@@ -270,10 +272,12 @@ class PipelineRunner:
 
     def _render_and_emit_frame(self, r: Any) -> None:
         try:
-            msg = _render_frame(r)  # 在 pipeline thread 編碼，不佔 event loop
+            with PERF.time("render"):
+                msg = _render_frame(r)  # 在 pipeline thread 編碼，不佔 event loop
         except Exception:
             log.exception("render_frame 失敗")
             return
+        PERF.count("sent")
         self._emit_frame(msg)
 
     def _emit_preview(self, r: Any) -> None:
@@ -409,7 +413,11 @@ def create_app(
     async def ws_sender(ws: WebSocket, conn: Conn) -> None:
         try:
             while True:
-                await ws.send_json(await conn.next())
+                msg = await conn.next()
+                if isinstance(msg, bytes):
+                    await ws.send_bytes(msg)
+                else:
+                    await ws.send_json(msg)
         except Exception:  # 送不出去 → 結束，由外層移除連線
             return
 

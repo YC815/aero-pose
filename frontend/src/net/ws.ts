@@ -1,4 +1,4 @@
-import type { ServerMsg } from '../types';
+import type { FrameMsg, ServerMsg } from '../types';
 
 export interface WSClient {
   send(msg: object): void;
@@ -73,6 +73,7 @@ export function connectWS(
       return;
     }
     socket = ws;
+    ws.binaryType = 'arraybuffer'; // frame 是二進位訊息
     armStale(ws);
     ws.onopen = () => {
       armStale(ws);
@@ -82,7 +83,7 @@ export function connectWS(
       armStale(ws);
       let msg: ServerMsg;
       try {
-        msg = JSON.parse(String(ev.data)) as ServerMsg;
+        msg = ev.data instanceof ArrayBuffer ? parseFrame(ev.data) : (JSON.parse(String(ev.data)) as ServerMsg);
       } catch {
         return; // 壞封包直接丟
       }
@@ -106,6 +107,33 @@ export function connectWS(
     get connected(): boolean {
       return socket !== null && socket.readyState === OPEN;
     },
+  };
+}
+
+const utf8 = new TextDecoder();
+
+/**
+ * frame 二進位訊息（後端 preview.pack_frame）：[u32 LE header 長度][header JSON][JPEG][mask，mask_w×mask_h bytes，可無]。
+ * jpeg / mask 是 buf 上的 view，不複製。長度對不上就 throw（呼叫端當壞封包丟掉）。
+ */
+export function parseFrame(buf: ArrayBuffer): FrameMsg {
+  const n = new DataView(buf).getUint32(0, true);
+  const h = JSON.parse(utf8.decode(new Uint8Array(buf, 4, n)));
+  const jpegAt = 4 + n;
+  const maskAt = jpegAt + h.jpeg_len;
+  const maskLen = h.has_mask ? h.mask_w * h.mask_h : 0;
+  if (h.type !== 'frame' || maskAt + maskLen !== buf.byteLength) {
+    throw new Error(`frame 長度不符：${buf.byteLength} bytes`);
+  }
+  return {
+    type: 'frame',
+    ts: h.ts,
+    width: h.width,
+    height: h.height,
+    mask_w: h.mask_w,
+    mask_h: h.mask_h,
+    jpeg: new Uint8Array(buf, jpegAt, h.jpeg_len),
+    mask: h.has_mask ? new Uint8Array(buf, maskAt, maskLen) : null,
   };
 }
 

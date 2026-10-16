@@ -3,6 +3,8 @@
 API 依據與來源見 docs/orbbec.md。重點：
 - color：優先 MJPG（SDK 對 Gemini336L 的預設即 1280x720@30 MJPG），轉成 RGB uint8。
 - depth：Y16，經 AlignFilter(COLOR_STREAM) 軟體 D2C 對齊到 color，再乘 get_depth_scale() (mm/單位) 轉公尺。
+  AERO_ORBBEC_ALIGN=hw 改用相機硬體 D2C（省掉 CPU 對齊；這組 color profile 不支援就自動退回軟體）。
+  AERO_ORBBEC_DEPTH=low 改用同 fps 最小解析度的 Y16（深度只用在關節附近取樣，解析度低軟體對齊比較快）。
 - 內參：pipeline.get_camera_param().rgb_intrinsic（color 解析度）。
 - 斷線：wait_for_frames 丟例外、連續 MAX_FRAME_ERRORS 幀轉換失敗、或超過 stall_s 沒有完整幀
   → 視為斷線，read() 回 None，每 retry_s 秒重開 pipeline。單一壞幀只丟掉那一幀。
@@ -24,6 +26,7 @@ import cv2
 import numpy as np
 
 from aero.config import REPO_ROOT
+from aero.perf import PERF
 from aero.types import Frame, Intrinsics
 
 log = logging.getLogger("aero.orbbec")
@@ -32,6 +35,8 @@ DOC_PATH = REPO_ROOT / "docs" / "orbbec.md"
 WAIT_MS = 1000  # wait_for_frames timeout
 START_TIMEOUT_S = 20.0  # pipeline.start 逾時（macOS 沒 root 時社群回報會卡住）
 COLOR_ENV = "AERO_ORBBEC_COLOR"  # mjpg（預設）| rgb
+ALIGN_ENV = "AERO_ORBBEC_ALIGN"  # sw（預設，CPU 上的 AlignFilter）| hw（相機硬體 D2C）
+DEPTH_ENV = "AERO_ORBBEC_DEPTH"  # default（SDK 預設，336L 為 848x480）| low（同 fps 最小解析度的 Y16）
 MAX_FRAME_ERRORS = 5  # 連續這麼多幀轉換失敗才當斷線重開
 INTR_RETRY_S = 2.0  # 內參取不到時的重試間隔
 
@@ -91,11 +96,45 @@ def _pick_profile(profile_list: Any, candidates: list[tuple[int, int, Any, int]]
     raise RuntimeError(f"找不到符合的 stream profile（{last}）。可用：{available}")
 
 
-def color_preference() -> str:
-    pref = os.environ.get(COLOR_ENV, "mjpg").strip().lower()
-    if pref not in ("mjpg", "rgb"):
-        raise ValueError(f"{COLOR_ENV} 只能是 mjpg 或 rgb，收到 {pref!r}")
+def _env_choice(env: str, choices: tuple[str, ...]) -> str:
+    """環境變數選項，沒設就是第一個。"""
+    pref = os.environ.get(env, choices[0]).strip().lower()
+    if pref not in choices:
+        raise ValueError(f"{env} 只能是 {' 或 '.join(choices)}，收到 {pref!r}")
     return pref
+
+
+def color_preference() -> str:
+    return _env_choice(COLOR_ENV, ("mjpg", "rgb"))
+
+
+def _video_profiles(profile_list: Any) -> list[Any]:
+    out = []
+    for i in range(len(profile_list)):
+        p = profile_list[i]
+        as_video = getattr(p, "as_video_stream_profile", None)
+        out.append(as_video() if as_video else p)
+    return out
+
+
+def _y16_by_area(sdk: Any, profiles: list[Any], fps: int) -> list[Any]:
+    """fps 相符的 Y16 profile，依解析度由小到大。"""
+    y16 = [p for p in profiles if p.get_format() == sdk.OBFormat.Y16 and p.get_fps() == fps]
+    return sorted(y16, key=lambda p: p.get_width() * p.get_height())
+
+
+def _hw_depth_profile(sdk: Any, pipeline: Any, color_profile: Any, fps: int, depth: str) -> Any | None:
+    """硬體 D2C 能搭配這組 color profile 的 depth profile；不支援回 None，呼叫端退回軟體對齊。"""
+    try:
+        listed = pipeline.get_d2c_depth_profile_list(color_profile, sdk.OBAlignMode.HW_MODE)
+        y16 = _y16_by_area(sdk, _video_profiles(listed), fps)
+    except Exception as e:
+        log.warning("取不到硬體 D2C 的 depth profile（%s），改用軟體對齊", e)
+        return None
+    if not y16:
+        log.warning("color %s 沒有可搭配硬體 D2C 的 Y16 @%dfps depth profile，改用軟體對齊", describe_profile(color_profile), fps)
+        return None
+    return y16[0] if depth == "low" else y16[-1]
 
 
 def _color_candidates(sdk: Any, w: int, h: int, fps: int, pref: str = "mjpg") -> list[tuple[int, int, Any, int]]:
@@ -106,8 +145,18 @@ def _color_candidates(sdk: Any, w: int, h: int, fps: int, pref: str = "mjpg") ->
     return [(w, h, f, fps) for f in fmts] + [(w, h, f, 0) for f in fmts]
 
 
-def _pick_depth_profile(sdk: Any, depth_list: Any, fps: int) -> Any:
-    """先用 SDK 預設（336L 為 848x480 Y16；解析度小，軟體 D2C 才跑得動）；預設不是 Y16 才搜尋。"""
+def _pick_depth_profile(sdk: Any, depth_list: Any, fps: int, depth: str = "default") -> Any:
+    """先用 SDK 預設（336L 為 848x480 Y16；解析度小，軟體 D2C 才跑得動）；預設不是 Y16 才搜尋。
+    depth="low"：改挑 fps 相符、解析度最小的 Y16；列舉不到就照預設規則。"""
+    if depth == "low":
+        try:
+            y16 = _y16_by_area(sdk, _video_profiles(depth_list), fps)
+        except Exception as e:
+            log.warning("列舉 depth profile 失敗：%s", e)
+            y16 = []
+        if y16:
+            return y16[0]
+        log.warning("找不到 Y16 @%dfps 的 depth profile，改用預設", fps)
     try:
         default = depth_list.get_default_video_stream_profile()
         if default.get_format() == sdk.OBFormat.Y16:
@@ -120,18 +169,25 @@ def _pick_depth_profile(sdk: Any, depth_list: Any, fps: int) -> Any:
         return depth_list.get_default_video_stream_profile()
 
 
-def _build_config(sdk: Any, pipeline: Any, w: int, h: int, fps: int, pref: str = "mjpg") -> tuple[Any, Any, Any]:
-    """回傳 (config, color_profile, depth_profile)。"""
+def _build_config(
+    sdk: Any, pipeline: Any, w: int, h: int, fps: int, pref: str = "mjpg", align: str = "sw", depth: str = "default"
+) -> tuple[Any, Any, Any, str]:
+    """回傳 (config, color_profile, depth_profile, 實際的 align)。align="hw" 不支援時退回 "sw"。"""
     config = sdk.Config()
     color_list = pipeline.get_stream_profile_list(sdk.OBSensorType.COLOR_SENSOR)
     color_profile = _pick_profile(color_list, _color_candidates(sdk, w, h, fps, pref))
-    depth_list = pipeline.get_stream_profile_list(sdk.OBSensorType.DEPTH_SENSOR)
-    depth_profile = _pick_depth_profile(sdk, depth_list, fps)
+    depth_profile = _hw_depth_profile(sdk, pipeline, color_profile, fps, depth) if align == "hw" else None
+    if depth_profile is not None:
+        config.set_align_mode(sdk.OBAlignMode.HW_MODE)
+    else:
+        align = "sw"
+        depth_list = pipeline.get_stream_profile_list(sdk.OBSensorType.DEPTH_SENSOR)
+        depth_profile = _pick_depth_profile(sdk, depth_list, fps, depth)
     config.enable_stream(color_profile)
     config.enable_stream(depth_profile)
     # 每個 frameset 都要同時有 color + depth（官方 03_color_and_depth_aligned.py 的 SW 對齊寫法）
     config.set_frame_aggregate_output_mode(sdk.OBFrameAggregateOutputMode.FULL_FRAME_REQUIRE)
-    return config, color_profile, depth_profile
+    return config, color_profile, depth_profile, align
 
 
 def _frameset_parts(frames: Any) -> tuple[Any, Any]:
@@ -229,6 +285,8 @@ class OrbbecSource:
         stall_s: float = 3.0,
         start_timeout_s: float = START_TIMEOUT_S,
         color_format: str | None = None,
+        align: str | None = None,
+        depth: str | None = None,
         intr_retry_s: float = INTR_RETRY_S,
         max_frame_errors: int = MAX_FRAME_ERRORS,
     ):
@@ -241,6 +299,8 @@ class OrbbecSource:
         self._color_pref = (color_format or color_preference()).lower()  # mjpg | rgb，見 AERO_ORBBEC_COLOR
         if self._color_pref not in ("mjpg", "rgb"):
             raise ValueError(f"color_format 只能是 mjpg 或 rgb，收到 {self._color_pref!r}")
+        self._align_pref = align or _env_choice(ALIGN_ENV, ("sw", "hw"))
+        self._depth_pref = depth or _env_choice(DEPTH_ENV, ("default", "low"))
         self._intr_retry_s = intr_retry_s
         self._max_frame_errors = max_frame_errors
         self._intr_failing = False  # 這一輪失敗是否已記錄過（每個失敗期只記一次）
@@ -250,7 +310,7 @@ class OrbbecSource:
         self.start_timed_out = False
         self._sdk: Any = None
         self._pipeline: Any = None
-        self._align: Any = None
+        self._align: Any = None  # 軟體對齊的 AlignFilter；硬體 D2C 時為 None
         self._intrinsics: Intrinsics | None = None
         self._last_attempt = float("-inf")
         self._last_ok = 0.0
@@ -278,7 +338,8 @@ class OrbbecSource:
             if self._pipeline is None:
                 return None
         try:
-            frames = self._pipeline.wait_for_frames(WAIT_MS)
+            with PERF.time("wait"):
+                frames = self._pipeline.wait_for_frames(WAIT_MS)
         except Exception as e:
             self._drop(f"讀取失敗：{e}")
             return None
@@ -305,18 +366,24 @@ class OrbbecSource:
     # -- internals ---------------------------------------------------------
 
     def _to_frame(self, frames: Any) -> Frame | None:
-        aligned = self._align.process(frames)
+        if self._align is None:
+            aligned = frames  # 硬體 D2C：相機送來的就是對齊好的
+        else:
+            with PERF.time("align"):
+                aligned = self._align.process(frames)
         if not aligned:
             return None
         color, depth = _frameset_parts(aligned)
         if not color or not depth:
             return None
         try:
-            rgb = color_to_rgb(self._sdk, color)
+            with PERF.time("decode"):
+                rgb = color_to_rgb(self._sdk, color)
         except ValueError as e:
             log.warning("丟棄壞幀：%s", e)
             return None
-        depth_m = depth_to_meters(depth)
+        with PERF.time("depth"):
+            depth_m = depth_to_meters(depth)
         if depth_m.shape != rgb.shape[:2]:  # 對齊後理應同尺寸；保險起見最近鄰縮放
             depth_m = cv2.resize(depth_m, (rgb.shape[1], rgb.shape[0]), interpolation=cv2.INTER_NEAREST)
         self._ensure_intrinsics(color)
@@ -374,7 +441,9 @@ class OrbbecSource:
         pipeline = None
         try:
             pipeline = sdk.Pipeline()
-            config, color_p, depth_p = _build_config(sdk, pipeline, self.width, self.height, self.fps, self._color_pref)
+            config, color_p, depth_p, align = _build_config(
+                sdk, pipeline, self.width, self.height, self.fps, self._color_pref, self._align_pref, self._depth_pref
+            )
             if not self._start_pipeline(pipeline, config):
                 self.start_timed_out = True
                 self.last_error = f"pipeline.start 超過 {self._start_timeout_s:g} 秒沒有回應"
@@ -382,7 +451,7 @@ class OrbbecSource:
                     self.last_error += f"（{SUDO_HINT}）"
                 log.error("Orbbec 開啟失敗：%s", self.last_error)
                 return  # 不呼叫 stop：卡住的 pipeline 可能連 stop 也會卡
-            self._align = sdk.AlignFilter(align_to_stream=sdk.OBStreamType.COLOR_STREAM)
+            self._align = sdk.AlignFilter(align_to_stream=sdk.OBStreamType.COLOR_STREAM) if align == "sw" else None
         except Exception as e:
             self.last_error = str(e) or type(e).__name__
             if macos_needs_sudo():
@@ -399,8 +468,8 @@ class OrbbecSource:
         self.start_timed_out = False
         self._last_ok = self._clock()
         self.last_error = None
-        self.profiles = {"color": describe_profile(color_p), "depth": describe_profile(depth_p)}
-        log.info("Orbbec 已開啟：color=%s depth=%s", self.profiles["color"], self.profiles["depth"])
+        self.profiles = {"color": describe_profile(color_p), "depth": describe_profile(depth_p), "align": align}
+        log.info("Orbbec 已開啟：color=%s depth=%s align=%s", self.profiles["color"], self.profiles["depth"], align)
 
     def _drop(self, reason: str) -> None:
         log.warning("Orbbec 斷線（%s），%g 秒後重試", reason, self._retry_s)

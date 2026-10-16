@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import base64
+import json
+import struct
 
 import cv2
 import numpy as np
@@ -53,8 +55,25 @@ def render_preview(r: StepResult, width: int = 480) -> dict:
     return {"type": "preview", "jpeg_b64": base64.b64encode(buf.tobytes()).decode("ascii"), "persons": persons}
 
 
-def render_frame(r: StepResult, width: int = 960, mask_width: int = 192) -> dict:
-    """前端畫面用的 frame 訊息：相機原始方向（不鏡像）的 JPEG + 選中者的二值 mask。spec v1.1。"""
+def pack_frame(header: dict, jpeg: bytes, mask: bytes | None) -> bytes:
+    """frame 的 WebSocket 二進位訊息：[u32 LE header 長度][header JSON][JPEG][mask，mask_w×mask_h bytes，可無]。
+    不用 base64 包在 JSON 裡：少 33% 流量，前端也不用逐字 atob。"""
+    h = json.dumps({**header, "jpeg_len": len(jpeg), "has_mask": mask is not None}).encode()
+    return struct.pack("<I", len(h)) + h + jpeg + (mask or b"")
+
+
+def unpack_frame(buf: bytes) -> dict:
+    """pack_frame 的反函式（測試、除錯用）：header 欄位 + jpeg（bytes）+ mask（bytes 或 None）。"""
+    (n,) = struct.unpack_from("<I", buf)
+    header = json.loads(buf[4 : 4 + n])
+    body = buf[4 + n :]
+    jpeg = body[: header["jpeg_len"]]
+    mask = body[header["jpeg_len"] :] if header["has_mask"] else None
+    return {**header, "jpeg": jpeg, "mask": mask}
+
+
+def render_frame(r: StepResult, width: int = 960, mask_width: int = 192) -> bytes:
+    """前端畫面用的 frame 訊息（二進位，見 pack_frame）：相機原始方向（不鏡像）的 JPEG + 選中者的二值 mask。spec v1.1。"""
     rgb = r.frame.rgb
     src_h, src_w = rgb.shape[:2]
     height = round(src_h * width / src_w)
@@ -64,18 +83,17 @@ def render_frame(r: StepResult, width: int = 960, mask_width: int = 192) -> dict
         raise RuntimeError("JPEG 編碼失敗")
 
     mask_h = round(mask_width * src_h / src_w)
-    mask_b64 = None
+    mask = None
     if r.selected_mask is not None:
         small = cv2.resize(r.selected_mask.astype(np.float32), (mask_width, mask_h), interpolation=cv2.INTER_AREA)
-        mask_b64 = base64.b64encode(np.where(small > 0.5, 255, 0).astype(np.uint8).tobytes()).decode("ascii")
+        mask = np.where(small > 0.5, 255, 0).astype(np.uint8).tobytes()
 
-    return {
+    header = {
         "type": "frame",
         "ts": r.frame.ts,
-        "jpeg_b64": base64.b64encode(buf.tobytes()).decode("ascii"),
         "width": width,
         "height": height,
-        "mask_b64": mask_b64,
         "mask_w": mask_width,
         "mask_h": mask_h,
     }
+    return pack_frame(header, buf.tobytes(), mask)

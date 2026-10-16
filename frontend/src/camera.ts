@@ -78,22 +78,6 @@ export function screenToMask(m: CoverMap, maskW: number, maskH: number, sx: numb
   out[1] *= maskH / m.srcH;
 }
 
-function b64ToBytes(b64: string): Uint8Array<ArrayBuffer> {
-  const bin = atob(b64);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return bytes;
-}
-
-/** base64 → 每像素 1 byte 的 mask（原始方向、row-major）。長度不是 w×h 時 throw。 */
-export function decodeMask(b64: string, w: number, h: number): Uint8Array {
-  const bytes = b64ToBytes(b64);
-  if (bytes.length !== w * h) {
-    throw new Error(`mask 長度 ${bytes.length} 不等於 ${w}×${h}`);
-  }
-  return bytes;
-}
-
 export interface MaskFrame {
   data: Uint8Array;
   w: number;
@@ -116,7 +100,6 @@ export class CameraView {
   private seq = 0;
   private shownSeq = 0;
   private disposed = false;
-  private warnedMask = false;
   private readonly onResize = (): void => this.draw();
   private readonly mat = [0, 0, 0, 0, 0, 0];
 
@@ -155,14 +138,8 @@ export class CameraView {
   setFrame(msg: FrameMsg): void {
     if (this.disposed) return;
     const seq = ++this.seq;
-    const mask = this.decodeFrameMask(msg);
-    let blob: Blob;
-    try {
-      blob = new Blob([b64ToBytes(msg.jpeg_b64)], { type: 'image/jpeg' });
-    } catch {
-      return; // base64 壞掉：丟掉這格
-    }
-    createImageBitmap(blob).then(
+    const mask: MaskFrame | null = msg.mask ? { data: msg.mask, w: msg.mask_w, h: msg.mask_h } : null;
+    createImageBitmap(new Blob([msg.jpeg], { type: 'image/jpeg' })).then(
       (bmp) => {
         if (this.disposed || seq <= this.shownSeq) {
           bmp.close();
@@ -193,19 +170,6 @@ export class CameraView {
     this.currentMask = null;
     this.currentMap = null;
     this.canvas.remove();
-  }
-
-  private decodeFrameMask(msg: FrameMsg): MaskFrame | null {
-    if (!msg.mask_b64) return null;
-    try {
-      return { data: decodeMask(msg.mask_b64, msg.mask_w, msg.mask_h), w: msg.mask_w, h: msg.mask_h };
-    } catch (err) {
-      if (!this.warnedMask) {
-        this.warnedMask = true;
-        console.warn('[camera] mask 格式不符，略過', err);
-      }
-      return null;
-    }
   }
 
   private draw(): void {

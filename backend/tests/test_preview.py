@@ -47,53 +47,60 @@ def _frame_result(mask=None, w=640, h=480, ts=1.5):
 
 
 def test_frame_格式與尺寸():
-    from aero.preview import render_frame
+    from aero.preview import render_frame, unpack_frame
 
     mask = np.zeros((480, 640), np.float32)
     mask[100:300, 200:400] = 1.0
-    msg = render_frame(_frame_result(mask))
-    assert set(msg) == {"type", "ts", "jpeg_b64", "width", "height", "mask_b64", "mask_w", "mask_h"}
+    msg = unpack_frame(render_frame(_frame_result(mask)))
     assert msg["type"] == "frame" and msg["ts"] == 1.5
     assert (msg["width"], msg["height"]) == (960, 720)
     assert (msg["mask_w"], msg["mask_h"]) == (192, 144)
-    img = cv2.imdecode(np.frombuffer(base64.b64decode(msg["jpeg_b64"]), np.uint8), cv2.IMREAD_COLOR)
+    img = cv2.imdecode(np.frombuffer(msg["jpeg"], np.uint8), cv2.IMREAD_COLOR)
     assert img.shape == (720, 960, 3)
 
 
 def test_frame_不鏡像且顏色為RGB轉BGR正確():
-    from aero.preview import render_frame
+    from aero.preview import render_frame, unpack_frame
 
-    msg = render_frame(_frame_result())
-    img = cv2.imdecode(np.frombuffer(base64.b64decode(msg["jpeg_b64"]), np.uint8), cv2.IMREAD_COLOR)
+    msg = unpack_frame(render_frame(_frame_result()))
+    img = cv2.imdecode(np.frombuffer(msg["jpeg"], np.uint8), cv2.IMREAD_COLOR)
     left, right = img[360, 100], img[360, 860]
     assert left[2] > 200 and left[0] < 60  # BGR：左半是紅
     assert right.sum() < 60  # 右半黑，沒有鏡像
 
 
 def test_frame_mask長度與二值():
-    from aero.preview import render_frame
+    from aero.preview import render_frame, unpack_frame
 
     mask = np.zeros((480, 640), np.float32)
     mask[:, :320] = 1.0  # 左半
-    msg = render_frame(_frame_result(mask))
-    raw = base64.b64decode(msg["mask_b64"])
+    msg = unpack_frame(render_frame(_frame_result(mask)))
+    raw = msg["mask"]
     assert len(raw) == msg["mask_w"] * msg["mask_h"]
     m = np.frombuffer(raw, np.uint8).reshape(msg["mask_h"], msg["mask_w"])
     assert set(np.unique(m)) <= {0, 255}
     assert m[:, :90].min() == 255 and m[:, 100:].max() == 0  # 不鏡像：mask 在左
 
 
-def test_frame_無mask時mask_b64為None():
-    from aero.preview import render_frame
+def test_frame_無mask時mask為None():
+    from aero.preview import render_frame, unpack_frame
 
-    msg = render_frame(_frame_result(None))
-    assert msg["mask_b64"] is None
+    msg = unpack_frame(render_frame(_frame_result(None)))
+    assert msg["mask"] is None and msg["has_mask"] is False
     assert (msg["mask_w"], msg["mask_h"]) == (192, 144)
 
 
-def test_frame_json可序列化():
+def test_frame_二進位格式():
+    """[u32 LE header 長度][header JSON][JPEG][mask]：前端 net/ws.ts 照這個解。"""
     import json
+    import struct
 
     from aero.preview import render_frame
 
-    json.dumps(render_frame(_frame_result(np.ones((480, 640), np.float32))))
+    buf = render_frame(_frame_result(np.ones((480, 640), np.float32)))
+    (n,) = struct.unpack_from("<I", buf)
+    header = json.loads(buf[4 : 4 + n])
+    assert header["has_mask"] is True
+    jpeg = buf[4 + n : 4 + n + header["jpeg_len"]]
+    assert jpeg[:2] == b"\xff\xd8"
+    assert len(buf) == 4 + n + header["jpeg_len"] + header["mask_w"] * header["mask_h"]

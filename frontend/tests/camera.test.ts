@@ -1,9 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { coverMap, decodeMask, mirrorTransform, screenToMask, screenToSource, sourceToScreen } from '../src/camera';
-
-function b64(bytes: number[]): string {
-  return btoa(String.fromCharCode(...bytes));
-}
+import { coverMap, mirrorTransform, screenToMask, screenToSource, sourceToScreen } from '../src/camera';
 
 describe('coverMap', () => {
   it('1280×720 進 1920×1080：scale 1.5、無 offset', () => {
@@ -114,17 +110,5 @@ describe('screenToMask', () => {
     screenToMask(m, 192, 108, 1920, 540, out);
     expect(out[0]).toBeCloseTo(0);
     expect(out[1]).toBeCloseTo(54);
-  });
-});
-
-describe('decodeMask', () => {
-  it('解出每像素 1 byte', () => {
-    const data = decodeMask(b64([0, 255, 255, 0, 0, 255]), 3, 2);
-    expect(Array.from(data)).toEqual([0, 255, 255, 0, 0, 255]);
-  });
-
-  it('長度不符 w×h 時 throw', () => {
-    expect(() => decodeMask(b64([0, 255, 255]), 2, 2)).toThrow();
-    expect(() => decodeMask(b64([0, 255, 255, 0, 0]), 2, 2)).toThrow();
   });
 });

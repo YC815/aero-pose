@@ -53,7 +53,8 @@ cd ../backend && uv run aero serve --source webcam     # 預設 port 8000
 4. 自檢：`sudo backend/.venv/bin/aero doctor`
    - 每項都要 `[PASS]`；看一眼 `data/doctor.png` 的彩色與深度疊圖有沒有對齊。
    - 不用 sudo 試一次：如果不加 sudo 也全部 PASS，下一步就不用 `AERO_SUDO=1`。
-5. 啟動：`AERO_SOURCE=orbbec AERO_SUDO=1 scripts/start.sh`（不需要 root 時拿掉 `AERO_SUDO=1`）
+5. 啟動：在 Finder 雙擊 `start.command`（等於 `AERO_SOURCE=orbbec AERO_SUDO=1 scripts/start.sh`，會問一次密碼；
+   不需要 root 時把檔案裡的 `AERO_SUDO` 改成 0）
 6. 開設定面板（`Ctrl+Shift+S`）看相機預覽，調相機高度、俯仰、站位區、距離範圍，讓站在膠帶上的人被選中（✔）。
 
 ### `AERO_SUDO=1` 的細節與後果
@@ -70,6 +71,28 @@ cd ../backend && uv run aero serve --source webcam     # 預設 port 8000
   ```bash
   sudo chown -R "$(id -un)" data
   ```
+
+## 效能選項與 perf log
+
+後端每 5 秒寫一行各階段耗時（中位數 ms）與頻率，實機找瓶頸看這行：
+
+```
+perf 5s | camera 30.0Hz step 30.0Hz sent 30.0Hz | wait 2.1 align 8.3 decode 1.6 depth 0.6 read 12.9 age 0.1 detect 21.2 post 0.3 render 5.3 ms
+```
+
+- `camera`：讀幀 thread 拿到幾幀；`step`：姿勢辨識幾步；`sent`：推給前端幾張畫面（上限 30）。
+- `wait / align / decode / depth`：Orbbec 等幀、軟體對齊、MJPG 解碼、深度轉換；`read` 是一幀總共；`age` 是幀等多久才被辨識。
+- `detect`：MediaPipe；`post`：3D、選人、濾波；`render`：畫面 JPEG。
+- `step` 跟不上 `camera` 就是辨識太慢；`camera` 低於 30 就看 `align`。
+
+| 變數 | 預設 | 說明 |
+| --- | --- | --- |
+| `AERO_PERF_LOG_S` | `5` | perf log 間隔秒數，0 = 關 |
+| `AERO_ORBBEC_ALIGN` | `sw` | `hw` = 相機硬體對齊，省掉 CPU 上的 `align`；這組 color profile 不支援會自動退回 `sw`（看啟動 log 的 `align=`） |
+| `AERO_ORBBEC_DEPTH` | `default` | `low` = 同 fps 最小解析度的深度（深度只用在關節附近取樣），軟體對齊比較快 |
+| `AERO_POSE_DELEGATE` | `cpu` | `gpu` = MediaPipe 用 Metal；建立或推論失敗自動退回 CPU。M3 實測：連續跑 7.8 ms，但照相機 30Hz 節奏呼叫要 20–31 ms，比 CPU 的 21 ms 還慢，所以預設關 |
+
+用法：寫在 `start.command` 的 `exec` 前面，例如 `export AERO_ORBBEC_ALIGN=hw`。
 
 ## 設定面板與快捷鍵
 

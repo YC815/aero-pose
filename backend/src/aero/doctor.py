@@ -38,7 +38,6 @@ class Fail(Exception):
 @dataclass
 class Ctx:
     sdk: Any = None
-    device_ctx: Any = None  # sdk.Context：持有到 run() 結束，免得列舉用的 context 提早被釋放
     source: OrbbecSource | None = None
     frames: list[Frame] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -59,8 +58,9 @@ def _parse_version(s: str) -> tuple[int, ...] | None:
 
 
 def _check_devices(ctx: Ctx) -> str:
-    ctx.device_ctx = ctx.sdk.Context()
-    devices = ctx.device_ctx.query_devices()
+    # Context 要活到列舉完（提早釋放 → NULL deviceMgr），但不能活過這個函式（佔住相機 → 第 3 項 uvc_open -3）
+    context = ctx.sdk.Context()
+    devices = context.query_devices()
     n = devices.get_count()
     if n == 0:
         hints = [

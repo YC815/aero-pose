@@ -62,11 +62,15 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     from aero.pose import PoseDetector
     from aero.server import create_app
     from aero.sources import make_source
+    from aero.sources.latest import LatestFrameSource
     from aero.uploader import make_uploader
 
     def factory(get_settings: Callable[[], Settings]) -> OwnedPipeline:
         return build_runner(
-            lambda: make_source(args.source, replay=args.replay, webcam_index=args.webcam_index),
+            # 讀幀放獨立 thread、只留最新一幀：見 sources/latest.py
+            lambda: LatestFrameSource(
+                make_source(args.source, replay=args.replay, webcam_index=args.webcam_index)
+            ),
             PoseDetector,
             Pipeline,
             get_settings,

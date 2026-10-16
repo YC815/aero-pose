@@ -54,14 +54,15 @@ export interface PreviewMsg {
  * Live camera frame for the full-screen camera view (v1.1). Sent to every client at <= 20 fps.
  * Both image and mask are in RAW camera orientation (not mirrored); the frontend mirrors on display.
  */
+/** 唯一的二進位訊息，由 net/ws.ts parseFrame 從 [u32 LE header 長度][header JSON][JPEG][mask] 解出。 */
 export interface FrameMsg {
   type: 'frame';
   ts: number;
-  jpeg_b64: string; // JPEG, width 960, height by camera aspect
+  jpeg: Uint8Array<ArrayBuffer>; // JPEG, width 960, height by camera aspect
   width: number;
   height: number;
   /** Selected player's segmentation mask, 1 byte per pixel (0 or 255), row-major, row 0 = top; null if no player. */
-  mask_b64: string | null;
+  mask: Uint8Array | null;
   mask_w: number; // 192
   mask_h: number; // round(192 * height / width)
 }

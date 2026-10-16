@@ -564,6 +564,7 @@ def test_doctor_sdk_import_failure_is_item_1(monkeypatch, doctor_env, capsys):
     assert "[FAIL] 1." in out and "orbbec.md" in out and "Traceback" not in out
 
 
-def test_doctor_keeps_context_alive_until_pipeline_start(doctor_env, world):
+def test_doctor_releases_enum_context_before_pipeline_start(doctor_env, world):
+    # 實機（Gemini 336L、macOS）：列舉用的 Context 沒放掉，pipeline.start 會 uvc_open -3
     assert doctor.run() == 0
-    assert world.ctx_alive_at_start is True
+    assert world.ctx_alive_at_start is False

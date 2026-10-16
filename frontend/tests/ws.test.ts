@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { connectWS } from '../src/net/ws';
+import { connectWS, parseFrame } from '../src/net/ws';
 import type { ServerMsg } from '../src/types';
 
 class FakeWS {
@@ -32,7 +32,7 @@ class FakeWS {
     this.readyState = 1;
     this.onopen?.(new Event('open'));
   }
-  fireMessage(data: string) {
+  fireMessage(data: string | ArrayBuffer) {
     this.onmessage?.({ data } as MessageEvent);
   }
   fireClose() {
@@ -241,5 +241,49 @@ describe('connectWS', () => {
       expect(FakeWS.instances[0].closeCalls).toBe(1);
       expect(FakeWS.instances).toHaveLength(1);
     });
+  });
+});
+
+/** 照後端 preview.pack_frame 組一個 frame 訊息。 */
+function packFrame(header: Record<string, unknown>, jpeg: number[], mask: number[] | null): ArrayBuffer {
+  const h = new TextEncoder().encode(
+    JSON.stringify({ ...header, jpeg_len: jpeg.length, has_mask: mask !== null }),
+  );
+  const out = new Uint8Array(4 + h.length + jpeg.length + (mask?.length ?? 0));
+  new DataView(out.buffer).setUint32(0, h.length, true);
+  out.set(h, 4);
+  out.set(jpeg, 4 + h.length);
+  if (mask) out.set(mask, 4 + h.length + jpeg.length);
+  return out.buffer;
+}
+
+const HEADER = { type: 'frame', ts: 1.5, width: 960, height: 540, mask_w: 3, mask_h: 2 };
+
+describe('parseFrame', () => {
+  it('解出 header、JPEG 與 mask', () => {
+    const f = parseFrame(packFrame(HEADER, [0xff, 0xd8, 1, 2], [0, 255, 255, 0, 0, 255]));
+    expect(f).toMatchObject({ type: 'frame', ts: 1.5, width: 960, height: 540, mask_w: 3, mask_h: 2 });
+    expect(Array.from(f.jpeg)).toEqual([0xff, 0xd8, 1, 2]);
+    expect(Array.from(f.mask!)).toEqual([0, 255, 255, 0, 0, 255]);
+  });
+
+  it('沒有 mask 時為 null', () => {
+    expect(parseFrame(packFrame(HEADER, [0xff, 0xd8], null)).mask).toBeNull();
+  });
+
+  it('mask 長度不符 mask_w×mask_h 時 throw', () => {
+    expect(() => parseFrame(packFrame(HEADER, [0xff, 0xd8], [0, 255, 255]))).toThrow();
+    expect(() => parseFrame(packFrame(HEADER, [0xff, 0xd8], [0, 255, 255, 0, 0, 255, 0]))).toThrow();
+  });
+
+  it('connectWS 把二進位訊息當 frame 交給 onMessage，壞的丟掉', () => {
+    const got: ServerMsg[] = [];
+    connectWS('ws://h/ws', { onMessage: (m) => got.push(m) }, { WebSocketImpl: Impl });
+    const ws = FakeWS.instances[0];
+    ws.fireOpen();
+    ws.fireMessage(packFrame(HEADER, [0xff, 0xd8], null));
+    ws.fireMessage(new Uint8Array([1, 2, 3]).buffer);
+    ws.fireMessage('{"type":"status","camera":"ok","fps":30}');
+    expect(got.map((m) => m.type)).toEqual(['frame', 'status']);
   });
 });

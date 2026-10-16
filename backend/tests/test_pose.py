@@ -138,3 +138,70 @@ def test_沒有mask時為None(monkeypatch):
     det, _ = _detector_with_fake(monkeypatch, [])
     persons = det.detect(np.zeros((6, 8, 3), np.uint8), 0)
     assert [p.mask for p in persons] == [None, None]
+
+
+class _DelegateLandmarker:
+    def __init__(self, delegate, fail_detect=False):
+        self.delegate, self.fail_detect, self.closed, self.formats = delegate, fail_detect, False, []
+
+    def detect_for_video(self, image, ts):
+        self.formats.append(image.image_format)
+        if self.fail_detect:
+            raise RuntimeError("GPU 掛了")
+        return type("R", (), {"pose_landmarks": [], "pose_world_landmarks": [], "segmentation_masks": None})()
+
+    def close(self):
+        self.closed = True
+
+
+def _fake_create(monkeypatch, fail_create=False, fail_detect=False):
+    made = []
+
+    def create(self, delegate):
+        if delegate == "gpu" and fail_create:
+            raise RuntimeError("no GPU")
+        lm = _DelegateLandmarker(delegate, fail_detect=fail_detect and delegate == "gpu")
+        made.append(lm)
+        return lm
+
+    monkeypatch.setattr(PoseDetector, "_create", create)
+    return made
+
+
+def test_gpu建立失敗退回cpu(monkeypatch, tmp_path):
+    made = _fake_create(monkeypatch, fail_create=True)
+    det = PoseDetector(model_path=tmp_path / "m.task", delegate="gpu")
+    assert det.delegate == "cpu" and [m.delegate for m in made] == ["cpu"]
+
+
+def test_gpu送SRGBA_推論失敗改用cpu重跑同一幀(monkeypatch, tmp_path):
+    import mediapipe as mp
+
+    made = _fake_create(monkeypatch, fail_detect=True)
+    det = PoseDetector(model_path=tmp_path / "m.task", delegate="gpu")
+    assert det.delegate == "gpu"
+    assert det.detect(np.zeros((8, 8, 3), np.uint8), 0) == []
+    gpu, cpu = made
+    assert gpu.formats == [mp.ImageFormat.SRGBA] and gpu.closed
+    assert cpu.formats == [mp.ImageFormat.SRGB] and det.delegate == "cpu"
+
+
+def test_delegate環境變數(monkeypatch, tmp_path):
+    from aero.pose import DELEGATE_ENV, delegate_preference
+
+    monkeypatch.delenv(DELEGATE_ENV, raising=False)
+    assert delegate_preference() == "cpu"
+    monkeypatch.setenv(DELEGATE_ENV, " GPU ")
+    assert delegate_preference() == "gpu"
+    monkeypatch.setenv(DELEGATE_ENV, "tpu")
+    with pytest.raises(ValueError):
+        delegate_preference()
+
+
+def test_gpu真模型可跑(model_ready):
+    """真的建 GPU delegate 跑一張圖；這台機器沒有 GPU 時會退回 CPU，兩種都不能炸。"""
+    det = PoseDetector(num_poses=3, delegate="gpu")
+    try:
+        assert det.detect(np.zeros((480, 640, 3), np.uint8), 0) == []
+    finally:
+        det.close()

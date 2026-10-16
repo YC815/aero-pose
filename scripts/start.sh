@@ -5,6 +5,9 @@
 #     只有後端是 root；pnpm 和 Chrome 一律用目前使用者跑。
 set -euo pipefail
 
+# Finder 雙擊（start.command）時 PATH 很陽春
+export PATH="/opt/homebrew/bin:$HOME/.local/bin:/usr/local/bin:$PATH"
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 AERO_SOURCE="${AERO_SOURCE:-orbbec}"
 AERO_SUDO="${AERO_SUDO:-0}"
@@ -28,6 +31,15 @@ case "$AERO_SOURCE" in
     exit 1
     ;;
 esac
+
+# 舊的還在跑就不要再開一份：port 會撞、相機會搶不到
+if nc -z localhost 8000 2>/dev/null; then
+  echo "port 8000 已被佔用：上一次的風阻可能還沒關。收掉：sudo pkill -f '.venv/bin/aero serve'" >&2
+  exit 1
+fi
+if nc -z localhost 8765 2>/dev/null; then
+  echo "注意：port 8765 有東西在跑（閃身步？），它會佔住相機，這邊會一直顯示設備調整中。" >&2
+fi
 
 # sudo 要先問密碼，免得 build 完才卡在密碼提示
 if [[ "$AERO_SUDO" == "1" ]]; then
@@ -117,6 +129,10 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+# 訊號一律轉成 exit，EXIT trap 才保證會跑（雙擊 start.command 後直接關 Terminal 視窗 = HUP）
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 # 無人攤位：本腳本活著期間不准螢幕／系統休眠。-w：腳本結束（含被 kill）caffeinate 自己跟著結束，不用 cleanup。
 if command -v caffeinate >/dev/null 2>&1; then

@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import itertools
+import json
 import threading
 import time
 
@@ -10,6 +11,7 @@ from fastapi.testclient import TestClient
 
 import aero.server as server
 from aero.config import Settings, settings_to_dict
+from aero.preview import pack_frame, unpack_frame
 from aero.server import create_app
 from aero.types import Frame, StepResult
 from aero.uploader import LocalUploader
@@ -66,9 +68,17 @@ def client(tmp_path, factory=None, uploader=None):
     return TestClient(app)
 
 
+def recv(ws) -> dict:
+    """frame 是二進位訊息（解開成 dict），其他是 JSON。"""
+    m = ws.receive()
+    if m.get("bytes") is not None:
+        return unpack_frame(m["bytes"])
+    return json.loads(m["text"])
+
+
 def recv_until(ws, pred, limit=200):
     for _ in range(limit):
-        m = ws.receive_json()
+        m = recv(ws)
         if pred(m):
             return m
     raise AssertionError("沒等到預期訊息")
@@ -175,14 +185,14 @@ def test_static_mounted_when_dist_exists(tmp_path, monkeypatch):
 
 def test_ws_first_message_is_settings(tmp_path):
     with client(tmp_path) as c, c.websocket_connect("/ws") as ws:
-        m = ws.receive_json()
+        m = recv(ws)
         assert m["type"] == "settings"
         assert m["settings"] == settings_to_dict(Settings())
 
 
 def test_ws_receives_settings_broadcast_on_put(tmp_path):
     with client(tmp_path) as c, c.websocket_connect("/ws") as ws:
-        ws.receive_json()
+        recv(ws)
         c.put("/api/settings", json=settings_to_dict(Settings(cd=0.9)))
         m = recv_until(ws, lambda m: m["type"] == "settings")
         assert m["settings"]["cd"] == 0.9
@@ -190,7 +200,7 @@ def test_ws_receives_settings_broadcast_on_put(tmp_path):
 
 def test_ws_ignores_garbage_messages(tmp_path):
     with client(tmp_path) as c, c.websocket_connect("/ws") as ws:
-        ws.receive_json()
+        recv(ws)
         ws.send_text("not json")
         ws.send_json({"type": "preview", "on": "yes"})
         ws.send_json({"type": "nope"})
@@ -200,7 +210,7 @@ def test_ws_ignores_garbage_messages(tmp_path):
 def test_pipeline_skeleton_then_disconnected_status(tmp_path):
     gate = threading.Event()
     with client(tmp_path, factory=lambda gs: FakePipeline(2, gate)) as c, c.websocket_connect("/ws") as ws:
-        assert ws.receive_json()["type"] == "settings"
+        assert recv(ws)["type"] == "settings"
         gate.set()
         sk = recv_until(ws, lambda m: m["type"] == "skeleton")
         assert sk["source"] == "fake"
@@ -367,7 +377,7 @@ def test_preview_only_after_subscribe(tmp_path, monkeypatch):
     with client(tmp_path, factory=lambda gs: Endless()) as c, c.websocket_connect("/ws") as ws:
         # 先收一段 skeleton，確認沒訂閱時不會 render / 推 preview
         for _ in range(5):
-            m = ws.receive_json()
+            m = recv(ws)
             assert m["type"] != "preview"
         assert rendered == []
         ws.send_json({"type": "preview", "on": True})
@@ -414,9 +424,9 @@ def test_hub_preview_routing():
     assert hub.preview_count == 0
 
 
-def _frame_msg(i: int) -> dict:
-    return {"type": "frame", "ts": float(i), "jpeg_b64": "AAAA", "width": 960, "height": 720,
-            "mask_b64": None, "mask_w": 192, "mask_h": 144}
+def _frame_msg(i: int) -> bytes:
+    header = {"type": "frame", "ts": float(i), "width": 960, "height": 720, "mask_w": 192, "mask_h": 144}
+    return pack_frame(header, b"\xff\xd8fake", None)
 
 
 def masked_result(n: int = 0) -> StepResult:
@@ -436,8 +446,8 @@ def test_frame_推給所有client(tmp_path):
             for ws in (ws1, ws2):  # 不需要訂閱 preview
                 m = recv_until(ws, lambda m: m["type"] == "frame")
                 assert m["width"] == 960 and m["mask_w"] == 192
-                assert len(base64.b64decode(m["mask_b64"])) == m["mask_w"] * m["mask_h"]
-                assert base64.b64decode(m["jpeg_b64"])[:2] == b"\xff\xd8"
+                assert len(m["mask"]) == m["mask_w"] * m["mask_h"]
+                assert m["jpeg"][:2] == b"\xff\xd8"
 
 
 def test_frame在pipeline_thread渲染且限制fps(tmp_path, monkeypatch):
@@ -458,7 +468,7 @@ def test_frame在pipeline_thread渲染且限制fps(tmp_path, monkeypatch):
     with client(tmp_path, factory=lambda gs: Endless()) as c, c.websocket_connect("/ws") as ws:
         recv_until(ws, lambda m: m["type"] == "frame")
         for _ in range(30):  # 之後只有 skeleton / status
-            assert ws.receive_json()["type"] != "frame"
+            assert recv(ws)["type"] != "frame"
     assert seen == ["aero-pipeline"]
 
 
@@ -530,6 +540,7 @@ def test_frame不擠掉status_settings且只留最新():
         for i in range(100, 200):
             hub.broadcast_frame(_frame_msg(i))
         got = [await asyncio.wait_for(conn.next(), 1) for _ in range(3)]
+        got[2] = unpack_frame(got[2])
         assert [m["type"] for m in got] == ["status", "settings", "frame"]  # 控制訊息優先
         assert got[2]["ts"] == 199.0  # 只留最新的 frame
         assert conn.frame is None and conn.queue.empty()

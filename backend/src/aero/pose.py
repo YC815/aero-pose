@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
+import os
 import urllib.request
 from pathlib import Path
 
+import cv2
 import mediapipe as mp
 import numpy as np
 from mediapipe.tasks.python import BaseOptions, vision
@@ -14,6 +17,18 @@ from aero.types import MP_INDEX, PersonPose
 
 MODEL_URL = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task"
 MODEL_NAME = "pose_landmarker_full.task"
+# cpu（預設）| gpu。M3 實測 full + segmentation + 3 人：CPU 21 ms → GPU 7.8 ms。
+# GPU 建立或推論失敗會自動退回 CPU。GPU 只吃 4 通道影像，所以送 SRGBA。
+DELEGATE_ENV = "AERO_POSE_DELEGATE"
+
+log = logging.getLogger(__name__)
+
+
+def delegate_preference() -> str:
+    pref = os.environ.get(DELEGATE_ENV, "cpu").strip().lower()
+    if pref not in ("cpu", "gpu"):
+        raise ValueError(f"{DELEGATE_ENV} 只能是 cpu 或 gpu，收到 {pref!r}")
+    return pref
 
 
 def ensure_model(dest_dir: Path = DATA_DIR / "models") -> Path:
@@ -37,17 +52,51 @@ def _mask_2d(view: np.ndarray) -> np.ndarray:
 
 
 class PoseDetector:
-    def __init__(self, num_poses: int = 3, model_path: Path | None = None):
-        path = model_path if model_path is not None else ensure_model()
+    def __init__(self, num_poses: int = 3, model_path: Path | None = None, delegate: str | None = None):
+        self._path = model_path if model_path is not None else ensure_model()
+        self._num_poses = num_poses
+        self.delegate = "cpu"
+        if (delegate or delegate_preference()) == "gpu":
+            try:
+                self._landmarker = self._create("gpu")
+                self.delegate = "gpu"
+            except Exception as e:
+                log.warning("MediaPipe GPU delegate 建立失敗，改用 CPU：%s", e)
+        if self.delegate == "cpu":
+            self._landmarker = self._create("cpu")
+        log.info("MediaPipe PoseLandmarker：%s", self.delegate)
+        self._last_ts = -1
+
+    def _create(self, delegate: str):
+        d = BaseOptions.Delegate.GPU if delegate == "gpu" else BaseOptions.Delegate.CPU
         options = vision.PoseLandmarkerOptions(
-            base_options=BaseOptions(model_asset_path=str(path)),
+            base_options=BaseOptions(model_asset_path=str(self._path), delegate=d),
             running_mode=vision.RunningMode.VIDEO,
-            num_poses=num_poses,
+            num_poses=self._num_poses,
             min_pose_detection_confidence=0.5,
             output_segmentation_masks=True,
         )
-        self._landmarker = vision.PoseLandmarker.create_from_options(options)
-        self._last_ts = -1
+        return vision.PoseLandmarker.create_from_options(options)
+
+    def _image(self, rgb: np.ndarray) -> mp.Image:
+        if self.delegate == "gpu":
+            return mp.Image(image_format=mp.ImageFormat.SRGBA, data=cv2.cvtColor(rgb, cv2.COLOR_RGB2RGBA))
+        return mp.Image(image_format=mp.ImageFormat.SRGB, data=np.ascontiguousarray(rgb))
+
+    def _run(self, rgb: np.ndarray, ts_ms: int):
+        try:
+            return self._landmarker.detect_for_video(self._image(rgb), ts_ms)
+        except Exception:
+            if self.delegate != "gpu":
+                raise
+            log.exception("MediaPipe GPU 推論失敗，改用 CPU")
+        try:
+            self._landmarker.close()
+        except Exception:
+            pass
+        self._landmarker = self._create("cpu")
+        self.delegate = "cpu"
+        return self._landmarker.detect_for_video(self._image(rgb), ts_ms)
 
     def detect(self, rgb: np.ndarray, ts_ms: int) -> list[PersonPose]:
         ts_ms = int(ts_ms)
@@ -56,8 +105,7 @@ class PoseDetector:
         self._last_ts = ts_ms
 
         h, w = rgb.shape[:2]
-        image = mp.Image(image_format=mp.ImageFormat.SRGB, data=np.ascontiguousarray(rgb))
-        result = self._landmarker.detect_for_video(image, ts_ms)
+        result = self._run(rgb, ts_ms)
 
         masks = result.segmentation_masks or []
         persons: list[PersonPose] = []

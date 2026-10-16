@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Callable, Protocol
 
 import numpy as np
@@ -9,6 +10,7 @@ import numpy as np
 from aero.config import Settings
 from aero.filter import JointFilter
 from aero.lift3d import lift_person
+from aero.perf import PERF
 from aero.selector import PlayerSelector, torso_center
 from aero.sources.base import FrameSource
 from aero.tilt import cam_to_world
@@ -50,7 +52,9 @@ class Pipeline:
         if frame is None:
             return None
         s = self._get_settings()
-        people = self._detector.detect(frame.rgb, int(frame.ts * 1000))
+        with PERF.time("detect"):
+            people = self._detector.detect(frame.rgb, int(frame.ts * 1000))
+        t_post = time.perf_counter()
 
         worlds = [
             cam_to_world(lift_person(p, frame), s.camera_height_m, s.camera_pitch_deg) for p in people
@@ -93,4 +97,6 @@ class Pipeline:
             "player": player,
         }
         selected_mask = None if idx is None else people[idx].mask
+        PERF.add("post", (time.perf_counter() - t_post) * 1000)
+        PERF.count("step")
         return StepResult(skeleton=skeleton, frame=frame, persons=persons, selected_mask=selected_mask)

@@ -91,13 +91,14 @@ function limitElbow(u: Vec3, f: Vec3): Vec3 {
   return add(scale(u, Math.cos(ELBOW_MAX)), scale(p, Math.sin(ELBOW_MAX)));
 }
 
-function arm(sk: PlayerSkeleton, frame: Frame, side: 'left' | 'right'): [Vec3, Vec3] {
+/** fallback：這段看不到時沿用的姿勢（呼叫端給上一個有效姿勢；沒有就是坐直）。 */
+function arm(sk: PlayerSkeleton, frame: Frame, side: 'left' | 'right', fallback: RiderPose): [Vec3, Vec3] {
   const sign = side === 'left' ? 1 : -1;
   const sh = `${side}_shoulder` as const;
   const el = `${side}_elbow` as const;
   const wr = `${side}_wrist` as const;
-  const defUpper = side === 'left' ? UPRIGHT_POSE.leftUpperArm : UPRIGHT_POSE.rightUpperArm;
-  const defFore = side === 'left' ? UPRIGHT_POSE.leftForearm : UPRIGHT_POSE.rightForearm;
+  const defUpper = side === 'left' ? fallback.leftUpperArm : fallback.rightUpperArm;
+  const defFore = side === 'left' ? fallback.leftForearm : fallback.rightForearm;
 
   const u = visible(sk, sh, el)
     ? upperArm(norm(toLocal(frame, sub(sk.joints[el], sk.joints[sh])), [0, -1, 0]), sign)
@@ -118,8 +119,15 @@ export function retarget(sk: PlayerSkeleton, torsoGain = 1.0): RiderPose {
   return retargetVisible(sk, torsoGain) ?? copyPose(UPRIGHT_POSE);
 }
 
-/** 軀幹不可見回 null：呼叫端應保留上一個有效姿勢，不能把它當成坐直。 */
-export function retargetVisible(sk: PlayerSkeleton, torsoGain = 1.0): RiderPose | null {
+/**
+ * 軀幹不可見回 null：呼叫端應保留上一個有效姿勢，不能把它當成坐直。
+ * 頭、手臂看不到時用 fallback 的那一段（呼叫端給上一個有效姿勢），不要一看不到就跳回坐直。
+ */
+export function retargetVisible(
+  sk: PlayerSkeleton,
+  torsoGain = 1.0,
+  fallback: RiderPose = UPRIGHT_POSE,
+): RiderPose | null {
   if (!torsoVisible(sk)) return null;
   const J = sk.joints;
 
@@ -138,8 +146,8 @@ export function retargetVisible(sk: PlayerSkeleton, torsoGain = 1.0): RiderPose 
   const yaw = wrapAngle(Math.atan2(-L[2], L[0]) - Math.atan2(-H[2], H[0]));
 
   // 頭
-  let headPitch = UPRIGHT_POSE.headPitch;
-  let headYaw = UPRIGHT_POSE.headYaw;
+  let headPitch = fallback.headPitch;
+  let headYaw = fallback.headYaw;
   if (visible(sk, 'nose', 'left_ear', 'right_ear')) {
     const d = toLocal(frame, sub(J.nose, mid(J.left_ear, J.right_ear)));
     const relPitch = Math.atan2(d[1], -d[2]);
@@ -147,8 +155,8 @@ export function retargetVisible(sk: PlayerSkeleton, torsoGain = 1.0): RiderPose 
     headYaw = clamp(Math.atan2(d[0], -d[2]), -HEAD_YAW_MAX, HEAD_YAW_MAX);
   }
 
-  const [leftUpperArm, leftForearm] = arm(sk, frame, 'left');
-  const [rightUpperArm, rightForearm] = arm(sk, frame, 'right');
+  const [leftUpperArm, leftForearm] = arm(sk, frame, 'left', fallback);
+  const [rightUpperArm, rightForearm] = arm(sk, frame, 'right', fallback);
 
   return {
     torsoPitch: clamp(UPRIGHT_POSE.torsoPitch + torsoGain * pitch, TORSO_PITCH_MIN, TORSO_PITCH_MAX),

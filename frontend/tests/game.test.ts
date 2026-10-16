@@ -241,10 +241,10 @@ describe('Game', () => {
     const settings = { ...DEFAULT_SETTINGS, record_s: 5, lost_timeout_s: 3 };
     const h = new Harness(settings);
     h.toRecording();
-    h.run(2, standing);
-    // 最後 3 秒都沒玩家：第 5 秒時同時滿足兩個條件
-    h.run(2.9, null);
-    expect(h.game.state).toBe('RECORDING');
+    h.run(1.9, standing);
+    // 第一個 null 在 2.0 s，連續消失 3 s 與錄滿 5 s 在同一個 update（5.0 s）同時成立
+    h.run(3.0, null);
+    expect(h.game.state).toBe('RECORDING'); // 4.9 s：兩個條件都還沒成立
     h.tick(null);
     expect(h.game.state).toBe('RESULT');
     expect(h.transitions.at(-1)).toEqual(['RECORDING', 'RESULT']);

@@ -1,4 +1,4 @@
-"""挑玩家：距離 + 站位 + 黏著。spec §4.3。"""
+"""挑玩家：黏著優先；新鎖定才看距離 + 站位。spec v1.1「選人黏著」。"""
 
 from __future__ import annotations
 
@@ -22,6 +22,13 @@ class PlayerSelector:
         self._last = None
 
     def select(self, centers: list[np.ndarray], s: Settings) -> int | None:
+        # 已鎖定：離上次夠近就沿用，不檢查距離範圍與站位（往前彎時肩寬估距會變小，不能因此踢人）
+        if self._last is not None and centers:
+            dist, nearest = min((float(np.linalg.norm(c - self._last)), i) for i, c in enumerate(centers))
+            if dist < STICKY_RADIUS_M:
+                self._last = centers[nearest]
+                return nearest
+        # 新鎖定：才套用範圍與站位
         eligible = [
             i
             for i, c in enumerate(centers)
@@ -32,9 +39,5 @@ class PlayerSelector:
             self._last = None
             return None
         chosen = min(eligible, key=lambda i: centers[i][2])
-        if self._last is not None:
-            dist, nearest = min((float(np.linalg.norm(centers[i] - self._last)), i) for i in eligible)
-            if dist < STICKY_RADIUS_M:
-                chosen = nearest
         self._last = centers[chosen]
         return chosen

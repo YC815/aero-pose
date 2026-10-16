@@ -38,6 +38,7 @@ class PoseDetector:
             running_mode=vision.RunningMode.VIDEO,
             num_poses=num_poses,
             min_pose_detection_confidence=0.5,
+            output_segmentation_masks=True,
         )
         self._landmarker = vision.PoseLandmarker.create_from_options(options)
         self._last_ts = -1
@@ -52,15 +53,18 @@ class PoseDetector:
         image = mp.Image(image_format=mp.ImageFormat.SRGB, data=np.ascontiguousarray(rgb))
         result = self._landmarker.detect_for_video(image, ts_ms)
 
+        masks = result.segmentation_masks or []
         persons: list[PersonPose] = []
-        for lms, world_lms in zip(result.pose_landmarks, result.pose_world_landmarks):
+        for i, (lms, world_lms) in enumerate(zip(result.pose_landmarks, result.pose_world_landmarks)):
             pixels, world, visibility = {}, {}, {}
             for name, idx in MP_INDEX.items():
                 lm, wl = lms[idx], world_lms[idx]
                 pixels[name] = (lm.x * w, lm.y * h)
                 world[name] = (wl.x, wl.y, wl.z)
                 visibility[name] = lm.visibility
-            persons.append(PersonPose(pixels=pixels, world=world, visibility=visibility))
+            # numpy_view 指向 MediaPipe 內部緩衝，必須複製
+            mask = np.array(masks[i].numpy_view(), dtype=np.float32) if i < len(masks) else None
+            persons.append(PersonPose(pixels=pixels, world=world, visibility=visibility, mask=mask))
         return persons
 
     def close(self) -> None:

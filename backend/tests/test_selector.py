@@ -74,3 +74,37 @@ def test_reset():
 
 def test_空候選():
     assert PlayerSelector().select([], S) is None
+
+
+def test_已鎖定_z掉到近界以下仍黏著():
+    sel = PlayerSelector()
+    assert sel.select([c(0.0, 2.0)], S) == 0
+    # 往前彎，肩寬估距變小，逐步掉到 depth_near 以下
+    assert sel.select([c(0.0, 1.7)], S) == 0
+    assert sel.select([c(0.0, 1.35)], S) == 0
+    assert sel.select([c(0.0, 1.2)], S) == 0  # 低於 depth_near 仍被選中
+
+
+def test_已鎖定_站位區外仍黏著():
+    sel = PlayerSelector()
+    assert sel.select([c(0.5, 2.0)], S) == 0
+    assert sel.select([c(0.8, 2.0)], S) == 0  # x 超出 0.6，但離上次 0.3 m
+
+
+def test_未鎖定_z1點2不選():
+    assert PlayerSelector().select([c(0.0, 1.2)], S) is None
+
+
+def test_已鎖定_多個黏著候選選最近者():
+    sel = PlayerSelector()
+    assert sel.select([c(0.0, 1.6)], S) == 0
+    assert sel.select([c(0.0, 1.4)], S) == 0  # 低於 depth_near 但已鎖定
+    # 兩個都在 0.4 m 內、都低於 depth_near；選離上次(z=1.4)最近的；第三人太遠且不合格
+    assert sel.select([c(0.3, 1.2), c(0.05, 1.3), c(2.0, 1.8)], S) == 1
+
+
+def test_已鎖定的人消失_新人需符合範圍():
+    sel = PlayerSelector()
+    assert sel.select([c(0.0, 2.0)], S) == 0
+    # 離上次 > 0.4 m 且 z 在範圍外 -> 不是黏著對象，也不合格
+    assert sel.select([c(0.0, 1.2)], S) is None

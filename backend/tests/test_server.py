@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import itertools
 import threading
@@ -411,6 +412,126 @@ def test_hub_preview_routing():
     assert a.queue.qsize() == 1 and b.queue.qsize() == 0
     hub.remove(a)
     assert hub.preview_count == 0
+
+
+def _frame_msg(i: int) -> dict:
+    return {"type": "frame", "ts": float(i), "jpeg_b64": "AAAA", "width": 960, "height": 720,
+            "mask_b64": None, "mask_w": 192, "mask_h": 144}
+
+
+def masked_result(n: int = 0) -> StepResult:
+    r = fake_result(n)
+    r.selected_mask = np.ones((4, 4), np.float32)
+    return r
+
+
+def test_frame_推給所有client(tmp_path):
+    class Endless:
+        def step(self):
+            time.sleep(0.01)
+            return masked_result()
+
+    with client(tmp_path, factory=lambda gs: Endless()) as c:
+        with c.websocket_connect("/ws") as ws1, c.websocket_connect("/ws") as ws2:
+            for ws in (ws1, ws2):  # 不需要訂閱 preview
+                m = recv_until(ws, lambda m: m["type"] == "frame")
+                assert m["width"] == 960 and m["mask_w"] == 192
+                assert len(base64.b64decode(m["mask_b64"])) == m["mask_w"] * m["mask_h"]
+                assert base64.b64decode(m["jpeg_b64"])[:2] == b"\xff\xd8"
+
+
+def test_frame在pipeline_thread渲染且限制fps(tmp_path, monkeypatch):
+    seen = []
+
+    def fake_render(r):
+        seen.append(threading.current_thread().name)
+        return _frame_msg(len(seen))
+
+    monkeypatch.setattr(server, "_render_frame", fake_render)
+    monkeypatch.setattr(server, "FRAME_INTERVAL_S", 1e9)  # 只放行第一個
+
+    class Endless:
+        def step(self):
+            time.sleep(0.005)
+            return fake_result()
+
+    with client(tmp_path, factory=lambda gs: Endless()) as c, c.websocket_connect("/ws") as ws:
+        recv_until(ws, lambda m: m["type"] == "frame")
+        for _ in range(30):  # 之後只有 skeleton / status
+            assert ws.receive_json()["type"] != "frame"
+    assert seen == ["aero-pipeline"]
+
+
+def test_沒有client不渲染frame(tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(server, "_render_frame", lambda r: seen.append(1) or _frame_msg(0))
+
+    class Endless:
+        def step(self):
+            time.sleep(0.005)
+            return fake_result()
+
+    with client(tmp_path, factory=lambda gs: Endless()):
+        time.sleep(0.2)
+    assert seen == []
+
+
+def test_frame_render例外不影響skeleton(tmp_path, monkeypatch):
+    def boom(r):
+        raise RuntimeError("render failed")
+
+    monkeypatch.setattr(server, "_render_frame", boom)
+
+    class Endless:
+        def step(self):
+            time.sleep(0.01)
+            return fake_result()
+
+    with client(tmp_path, factory=lambda gs: Endless()) as c, c.websocket_connect("/ws") as ws:
+        for _ in range(10):
+            recv_until(ws, lambda m: m["type"] == "skeleton")
+
+
+def test_frame不擠掉status_settings且只留最新():
+    async def run():
+        hub = server.Hub()
+        conn = hub.add([])
+        for i in range(100):  # 慢 client：frame 狂灌
+            hub.broadcast_frame(_frame_msg(i))
+        hub.broadcast({"type": "status", "camera": "ok", "fps": 1.0})
+        hub.broadcast({"type": "settings", "settings": {}})
+        for i in range(100, 200):
+            hub.broadcast_frame(_frame_msg(i))
+        got = [await asyncio.wait_for(conn.next(), 1) for _ in range(3)]
+        assert [m["type"] for m in got] == ["status", "settings", "frame"]  # 控制訊息優先
+        assert got[2]["ts"] == 199.0  # 只留最新的 frame
+        assert conn.frame is None and conn.queue.empty()
+
+    asyncio.run(run())
+
+
+def test_慢client_status仍送達(tmp_path, monkeypatch):
+    """frame 大量產出、client 讀得慢，status 仍要到。"""
+    monkeypatch.setattr(server, "FRAME_INTERVAL_S", 0.0)
+    monkeypatch.setattr(server, "_render_frame", lambda r: _frame_msg(0))
+
+    class Endless:
+        def step(self):
+            time.sleep(0.001)
+            return fake_result()
+
+    with client(tmp_path, factory=lambda gs: Endless()) as c, c.websocket_connect("/ws") as ws:
+        time.sleep(0.3)  # 不讀，讓 queue 與 frame 槽都被灌滿
+        recv_until(ws, lambda m: m["type"] == "status" and m["camera"] == "ok", limit=2000)
+
+
+def test_hub_remove_更新client_count():
+    hub = server.Hub()
+    a = hub.add([])
+    assert hub.client_count == 1
+    hub.remove(a)
+    hub.remove(a)
+    assert hub.client_count == 0
 
 
 # ---- cli ----

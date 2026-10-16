@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import urllib.request
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -71,3 +72,69 @@ def test_timestamps_made_strictly_increasing(model_ready):
             assert det.detect(img, ts) == []
     finally:
         det.close()
+
+
+class _FakeLm:
+    def __init__(self, x=0.5, y=0.5):
+        self.x, self.y, self.z, self.visibility = x, y, 0.0, 0.9
+
+
+class _FakeMaskImage:
+    def __init__(self, arr):
+        self._arr = arr
+
+    def numpy_view(self):
+        return self._arr
+
+
+class _FakeLandmarker:
+    def __init__(self, masks):
+        self.masks = masks
+
+    def detect_for_video(self, image, ts_ms):
+        lms = [_FakeLm() for _ in range(33)]
+
+        class R:
+            pose_landmarks = [lms, lms]
+            pose_world_landmarks = [lms, lms]
+            segmentation_masks = self.masks
+
+        return R
+
+    def close(self): ...
+
+
+def _detector_with_fake(monkeypatch, masks):
+    captured = {}
+
+    def fake_create(options):
+        captured["options"] = options
+        return _FakeLandmarker(masks)
+
+    monkeypatch.setattr(
+        "aero.pose.vision.PoseLandmarker.create_from_options", staticmethod(fake_create)
+    )
+    det = PoseDetector(num_poses=2, model_path=Path("unused.task"))
+    return det, captured
+
+
+def test_開啟分割mask(monkeypatch):
+    _, captured = _detector_with_fake(monkeypatch, [])
+    assert captured["options"].output_segmentation_masks is True
+
+
+def test_每人帶對應index的mask(monkeypatch):
+    m0 = np.zeros((6, 8), np.float32)
+    m1 = np.ones((6, 8), np.float32)
+    det, _ = _detector_with_fake(monkeypatch, [_FakeMaskImage(m0), _FakeMaskImage(m1)])
+    persons = det.detect(np.zeros((6, 8, 3), np.uint8), 0)
+    assert len(persons) == 2
+    assert persons[0].mask.dtype == np.float32 and persons[0].mask.shape == (6, 8)
+    assert persons[0].mask.sum() == 0 and persons[1].mask.sum() == 48
+    assert not np.shares_memory(persons[1].mask, m1)  # 已複製，不指向 MediaPipe 緩衝
+
+
+def test_沒有mask時為None(monkeypatch):
+    det, _ = _detector_with_fake(monkeypatch, [])
+    persons = det.detect(np.zeros((6, 8, 3), np.uint8), 0)
+    assert [p.mask for p in persons] == [None, None]

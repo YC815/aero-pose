@@ -153,3 +153,43 @@ def test_選中者消失_重設濾波器():
     x = r.skeleton["player"]["joints"]["left_hip"][0]
     raw_x = (320.0 + 60.0 + 57.0 * 0.7 - 320.0) / 600 * 2.0
     assert abs(x - raw_x) < 1e-6
+
+
+def test_selected_mask_傳遞選中者的mask():
+    left, right = make_person(160.0), make_person(480.0)
+    left.mask = np.full((480, 640), 0.25, np.float32)
+    right.mask = np.full((480, 640), 0.75, np.float32)
+    pipe = Pipeline(FakeSource(right_val=1.8), FakeDetector([left, right]), lambda: Settings())
+    r = pipe.step()
+    assert [p["selected"] for p in r.persons] == [False, True]
+    assert r.selected_mask is right.mask
+
+
+def test_沒選中_selected_mask為None():
+    p = make_person(320.0)
+    p.mask = np.ones((480, 640), np.float32)
+    pipe = Pipeline(FakeSource(depth_val=5.0), FakeDetector([p]), lambda: Settings())
+    r = pipe.step()
+    assert r.skeleton["player"] is None and r.selected_mask is None
+
+
+def test_選中者沒有mask_selected_mask為None():
+    pipe = Pipeline(FakeSource(), FakeDetector([make_person(320.0)]), lambda: Settings())
+    assert pipe.step().selected_mask is None
+
+
+def test_往前彎z掉到近界以下仍保持選中():
+    det = FakeDetector([make_person(320.0, half_w=57.0)])  # 無深度時肩寬 114px -> 2.0 m
+    class NoDepth(FakeSource):
+        def read(self):
+            f = super().read()
+            f.depth_m = None
+            return f
+
+    pipe = Pipeline(NoDepth(), det, lambda: Settings())
+    assert pipe.step().skeleton["player"] is not None
+    for half_w in (66.0, 76.0, 88.0, 100.0):  # 肩寬變大 -> 估距 1.7, 1.5, 1.3, 1.14 m
+        det.persons = [make_person(320.0, half_w=half_w)]
+        r = pipe.step()
+        assert r.skeleton["player"] is not None, half_w
+    assert r.skeleton["player"]["distance_m"] < Settings().depth_near_m

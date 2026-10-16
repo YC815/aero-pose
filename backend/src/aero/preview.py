@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 
 import cv2
+import numpy as np
 
 from aero.types import StepResult
 
@@ -50,3 +51,31 @@ def render_preview(r: StepResult, width: int = 480) -> dict:
     if not ok:
         raise RuntimeError("JPEG 編碼失敗")
     return {"type": "preview", "jpeg_b64": base64.b64encode(buf.tobytes()).decode("ascii"), "persons": persons}
+
+
+def render_frame(r: StepResult, width: int = 960, mask_width: int = 192) -> dict:
+    """前端畫面用的 frame 訊息：相機原始方向（不鏡像）的 JPEG + 選中者的二值 mask。spec v1.1。"""
+    rgb = r.frame.rgb
+    src_h, src_w = rgb.shape[:2]
+    height = round(src_h * width / src_w)
+    img = cv2.cvtColor(cv2.resize(rgb, (width, height), interpolation=cv2.INTER_AREA), cv2.COLOR_RGB2BGR)
+    ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 70])
+    if not ok:
+        raise RuntimeError("JPEG 編碼失敗")
+
+    mask_h = round(mask_width * src_h / src_w)
+    mask_b64 = None
+    if r.selected_mask is not None:
+        small = cv2.resize(r.selected_mask.astype(np.float32), (mask_width, mask_h), interpolation=cv2.INTER_AREA)
+        mask_b64 = base64.b64encode(np.where(small > 0.5, 255, 0).astype(np.uint8).tobytes()).decode("ascii")
+
+    return {
+        "type": "frame",
+        "ts": r.frame.ts,
+        "jpeg_b64": base64.b64encode(buf.tobytes()).decode("ascii"),
+        "width": width,
+        "height": height,
+        "mask_b64": mask_b64,
+        "mask_w": mask_width,
+        "mask_h": mask_h,
+    }

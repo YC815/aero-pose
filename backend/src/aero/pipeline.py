@@ -92,4 +92,5 @@ class Pipeline:
             "has_depth": frame.depth_m is not None,
             "player": player,
         }
-        return StepResult(skeleton=skeleton, frame=frame, persons=persons)
+        selected_mask = None if idx is None else people[idx].mask
+        return StepResult(skeleton=skeleton, frame=frame, persons=persons, selected_mask=selected_mask)

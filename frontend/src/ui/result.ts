@@ -1,7 +1,7 @@
 import QRCode from 'qrcode';
 import type { SessionSummary } from '../types';
 import { DISCLAIMER, EXPLAIN, resultTexts } from './card';
-import { paintChart } from './chart';
+import { ChartCanvas } from './chart';
 
 export interface ResultView {
   summary: SessionSummary;
@@ -26,7 +26,7 @@ export class ResultScreen {
   private readonly wattsN: HTMLElement;
   private readonly pctVerb: HTMLElement;
   private readonly pctN: HTMLElement;
-  private readonly chart: HTMLCanvasElement;
+  private readonly chart: ChartCanvas;
   private readonly server: HTMLElement;
   private readonly rank: HTMLElement;
   private readonly rider: HTMLElement;
@@ -86,7 +86,7 @@ export class ResultScreen {
     this.wattsN = q('.ap-result__watts-n');
     this.pctVerb = q('.ap-result__pct-verb');
     this.pctN = q('.ap-result__pct-n');
-    this.chart = q<HTMLCanvasElement>('.ap-result__chart');
+    this.chart = new ChartCanvas(q<HTMLCanvasElement>('.ap-result__chart'));
     this.server = q('.ap-result__server');
     this.rank = q('.ap-result__rank-n');
     this.rider = q('.ap-result__rider');
@@ -111,7 +111,7 @@ export class ResultScreen {
     this.watts.classList.toggle('is-worse', !t.saved);
     this.pctVerb.textContent = t.pctVerb;
     this.pctN.textContent = t.pct;
-    this.pctN.classList.toggle('is-worse', t.pctVerb !== '少');
+    this.pctN.classList.toggle('is-worse', !t.pctBetter);
 
     // 等 setServerInfo；先顯示「登錄中」
     this.server.dataset.state = 'pending';
@@ -119,14 +119,15 @@ export class ResultScreen {
     this.el.classList.remove('is-visible');
     void this.el.offsetWidth; // 重播進場動畫
     this.el.classList.add('is-visible');
+    this.chart.resize(); // 每輪量一次尺寸；之後每幀 setPlayhead 只用快取
     this.setPlayhead(0);
     return this.session;
   }
 
-  /** 曲線遊標（秒，相對錄製開始）；main 每幀依重播進度呼叫。 */
+  /** 曲線遊標（秒，相對錄製開始）；main 每幀依重播進度呼叫。只用快取的尺寸，不讀 DOM。 */
   setPlayhead(t: number): void {
     if (!this.summary) return;
-    paintChart(this.chart, this.summary.samples, this.summary.durationS, true, t);
+    this.chart.draw(this.summary.samples, this.summary.durationS, true, t);
   }
 
   /**

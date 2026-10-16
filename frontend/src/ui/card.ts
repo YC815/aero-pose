@@ -20,6 +20,7 @@ export interface ResultTexts {
   saved: boolean; // 平均瓦數 ≥ 0
   wattsVerb: string; // "省" / "多花"
   wattsNum: string; // "37"（絕對值）
+  pctBetter: boolean; // 平均面積比坐直小（四捨五入後的 % ≥ 0）；百分比的動詞和顏色都看它
   pctVerb: string; // "少" / "多"
   pct: string; // "18%"（絕對值）
 }
@@ -34,6 +35,7 @@ export function resultTexts(v: ResultView): ResultTexts {
     saved: watts >= 0,
     wattsVerb: watts >= 0 ? '省' : '多花',
     wattsNum: String(Math.abs(watts)),
+    pctBetter: pct >= 0,
     pctVerb: pct >= 0 ? '少' : '多',
     pct: `${Math.abs(pct)}%`,
   };
@@ -214,7 +216,7 @@ export async function renderResultCard(v: ResultView): Promise<string> {
     ny,
     [
       { text: t.pctVerb, weight: 800, size: 64, family: FONT_TEXT, color: INK },
-      { text: t.pct, weight: 800, size: 128, family: FONT_NUM, color: t.saved ? WIND : INK, gap: 10 },
+      { text: t.pct, weight: 800, size: 128, family: FONT_NUM, color: t.pctBetter ? WIND : INK, gap: 10 },
     ],
     W - PAD - RX,
   );

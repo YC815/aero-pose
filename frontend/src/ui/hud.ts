@@ -1,5 +1,5 @@
 import type { SessionSample } from '../types';
-import { paintChart } from './chart';
+import { ChartCanvas } from './chart';
 
 /** 遊戲中的抬頭顯示，疊在相機畫面上：COUNTDOWN 超大 3、2、1；RECORDING 即時省幾瓦、剩幾秒、逐漸長出來的小曲線。 */
 export class Hud {
@@ -10,7 +10,7 @@ export class Hud {
   private readonly verb: HTMLElement;
   private readonly left: HTMLElement;
   private readonly leftN: HTMLElement;
-  private readonly chart: HTMLCanvasElement;
+  private readonly chart: ChartCanvas;
   private durationS = 10;
   private lastCount = -1;
   private lastLeft = -1;
@@ -30,10 +30,10 @@ export class Hud {
           <p class="ap-hud__watts">
             <span class="ap-hud__verb">省</span><span class="ap-num ap-hud__watts-n">—</span><span class="ap-hud__unit">瓦</span>
           </p>
-          <div class="ap-hud__side">
-            <p class="ap-hud__badge"><i></i>錄製中</p>
-            <p class="ap-hud__left">剩 <b class="ap-num ap-hud__left-n"></b> 秒</p>
-          </div>
+        </div>
+        <div class="ap-hud__side">
+          <p class="ap-hud__badge"><i></i>錄製中</p>
+          <p class="ap-hud__left">剩 <b class="ap-num ap-hud__left-n"></b> 秒</p>
         </div>
         <div class="ap-hud__bottom">
           <p class="ap-hud__tip">趴低、縮小，讓紅色變少！</p>
@@ -46,7 +46,7 @@ export class Hud {
     this.verb = this.el.querySelector('.ap-hud__verb') as HTMLElement;
     this.left = this.el.querySelector('.ap-hud__left') as HTMLElement;
     this.leftN = this.el.querySelector('.ap-hud__left-n') as HTMLElement;
-    this.chart = this.el.querySelector('.ap-hud__chart') as HTMLCanvasElement;
+    this.chart = new ChartCanvas(this.el.querySelector('.ap-hud__chart') as HTMLCanvasElement);
     root.appendChild(this.el);
   }
 
@@ -73,6 +73,7 @@ export class Hud {
     this.setWatts(null);
     this.setTimeLeft(this.durationS);
     this.setState('RECORDING');
+    this.chart.resize(); // 曲線區剛從 display:none 變可見，量一次尺寸
     this.setSamples([]);
   }
 
@@ -96,7 +97,7 @@ export class Hud {
   /** 到目前為止的樣本；曲線 x 軸固定為整段錄製長度，所以會從左往右長。 */
   setSamples(s: readonly SessionSample[]): void {
     if (this.el.dataset.state !== 'RECORDING') return;
-    paintChart(this.chart, s, this.durationS, false);
+    this.chart.draw(s, this.durationS, false);
   }
 
   hide(): void {

@@ -548,15 +548,14 @@ body {
   inset: 0;
 }
 
-/* 頂部中央：即時省幾瓦 + 剩幾秒 */
+/* 頂部中央只放即時省幾瓦（窄、矮，少擋玩家的頭）；剩幾秒放右上角 */
 .ap-hud__top {
   position: absolute;
-  top: 2.5vh;
+  top: 1.5vh;
   left: 50%;
   display: flex;
   align-items: center;
-  gap: 2.6vw;
-  padding: 1vh 2.6vw;
+  padding: 0.8vh 2.2vw;
   border: 1px solid var(--ap-line);
   border-radius: 3vh;
   background: rgba(4, 10, 23, 0.58);
@@ -567,7 +566,7 @@ body {
 }
 
 .ap-hud__watts {
-  font-size: 15vh; /* ≥ 12vh：3 公尺外看得清 */
+  font-size: 13vh; /* ≥ 12vh：3 公尺外看得清 */
   font-weight: 900;
   line-height: 1;
   color: var(--ap-hi);
@@ -597,11 +596,20 @@ body {
 }
 
 .ap-hud__side {
+  position: absolute;
+  top: 1.5vh;
+  right: 2.5vw;
   display: flex;
   flex-direction: column;
-  gap: 0.6vh;
-  padding-left: 2.6vw;
-  border-left: 1px solid var(--ap-line);
+  align-items: flex-end;
+  gap: 0.4vh;
+  padding: 1vh 1.6vw;
+  border: 1px solid var(--ap-line);
+  border-radius: 3vh;
+  background: rgba(4, 10, 23, 0.58);
+  backdrop-filter: blur(6px);
+  white-space: nowrap;
+  animation: ap-drop 0.5s var(--ap-ease) both;
 }
 
 .ap-hud__badge {
@@ -626,13 +634,14 @@ body {
 .ap-hud__left {
   font-size: 4vh;
   font-weight: 800;
+  line-height: 1;
   text-shadow: var(--ap-shadow-strong);
 }
 
 .ap-hud__left b {
   display: inline-block;
   min-width: 1.2em;
-  font-size: 2em;
+  font-size: 11vh; /* 主要數字 ≥ 10vh */
   text-align: center;
 }
 
@@ -752,7 +761,7 @@ body {
 }
 
 .ap-result__watts {
-  font-size: min(15vh, 8vw); /* 16:9 時約 14vh，≥ 12vh */
+  font-size: max(12.5vh, min(15vh, 8vw)); /* 任何比例都 ≥ 12vh；太寬時 head 換行 */
   color: var(--ap-hi);
   text-shadow: 0 0 3vh var(--ap-hi-glow);
 }
@@ -763,7 +772,7 @@ body {
 }
 
 .ap-result__pct {
-  font-size: min(11.5vh, 6.2vw); /* 16:9 時約 11vh，≥ 10vh */
+  font-size: max(10.5vh, min(11.5vh, 6.2vw)); /* 任何比例都 ≥ 10vh；太寬時 head 換行 */
 }
 
 .ap-result__verb {

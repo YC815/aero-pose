@@ -2,7 +2,7 @@ import type { SessionSample } from '../types';
 
 // 瓦數曲線（Canvas2D）：結果頁、錄製 HUD 小曲線、結果卡共用。
 // y = 這一刻比坐直省幾瓦（0 = 坐直騎，往上 = 省、往下 = 多花），x = 錄製開始後的秒數。
-// 純繪圖，不碰 DOM（fitCanvas / paintChart 例外，只在瀏覽器用）。
+// 純繪圖，不碰 DOM（fitCanvas / ChartCanvas 例外，只在瀏覽器用）。
 
 export const FONT_TEXT = '"PingFang TC", "Noto Sans TC", "Microsoft JhengHei", sans-serif';
 export const FONT_NUM = '-apple-system, "SF Pro Display", "Helvetica Neue", "PingFang TC", sans-serif';
@@ -221,17 +221,49 @@ export function fitCanvas(c: HTMLCanvasElement): { width: number; height: number
   return { width: c.width, height: c.height };
 }
 
-/** 對齊尺寸、清空、重畫。HUD 和結果頁用。 */
-export function paintChart(
-  c: HTMLCanvasElement,
-  samples: readonly SessionSample[],
-  durationS: number,
-  showAxis: boolean,
-  playheadT?: number,
-): void {
-  const ctx = c.getContext('2d');
-  if (!ctx) return;
-  const { width, height } = fitCanvas(c);
-  ctx.clearRect(0, 0, width, height);
-  drawWattsChart(ctx, samples, { width, height, durationS, showAxis }, playheadT);
+interface DrawArgs {
+  samples: readonly SessionSample[];
+  durationS: number;
+  showAxis: boolean;
+  playheadT?: number;
+}
+
+/**
+ * HUD 和結果頁用的曲線 canvas：像素尺寸快取起來，只在尺寸變了（ResizeObserver）或呼叫 resize() 時才量 DOM，
+ * 所以每幀 draw()（例如重播遊標）不會讀 clientWidth 觸發排版。尺寸變了會用上一次的參數自動重畫。
+ */
+export class ChartCanvas {
+  private readonly canvas: HTMLCanvasElement;
+  private readonly ctx: CanvasRenderingContext2D | null;
+  private width: number;
+  private height: number;
+  private last: DrawArgs | null = null;
+
+  constructor(canvas: HTMLCanvasElement) {
+    this.canvas = canvas;
+    this.ctx = canvas.getContext('2d');
+    this.width = canvas.width;
+    this.height = canvas.height;
+    if (typeof ResizeObserver !== 'undefined') new ResizeObserver(() => this.resize()).observe(canvas);
+  }
+
+  /** 重新量 CSS 尺寸（畫面剛顯示時呼叫一次即可），並重畫。 */
+  resize(): void {
+    const s = fitCanvas(this.canvas);
+    this.width = s.width;
+    this.height = s.height;
+    this.redraw();
+  }
+
+  draw(samples: readonly SessionSample[], durationS: number, showAxis: boolean, playheadT?: number): void {
+    this.last = { samples, durationS, showAxis, playheadT };
+    this.redraw();
+  }
+
+  private redraw(): void {
+    if (!this.ctx || !this.last) return;
+    const { samples, durationS, showAxis, playheadT } = this.last;
+    this.ctx.clearRect(0, 0, this.width, this.height);
+    drawWattsChart(this.ctx, samples, { width: this.width, height: this.height, durationS, showAxis }, playheadT);
+  }
 }

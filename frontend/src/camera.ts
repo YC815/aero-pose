@@ -86,7 +86,8 @@ export interface MaskFrame {
 
 /** RESULT 時相機畫面壓暗的程度。 */
 const DIM_FILTER = 'brightness(0.35) saturate(0.6)';
-const FULL_FILTER = 'brightness(1) saturate(1)';
+// 平常用 none：掛著 brightness(1) 這種「沒效果」的 filter，全螢幕畫面每次更新仍要多跑一次濾鏡。none ↔ filter 清單照樣能 transition。
+const FULL_FILTER = 'none';
 
 /** 全螢幕、最底層的相機畫面 canvas。畫面只在新影格解碼完成或視窗尺寸改變時重畫。 */
 export class CameraView {

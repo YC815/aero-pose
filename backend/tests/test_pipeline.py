@@ -193,3 +193,19 @@ def test_往前彎z掉到近界以下仍保持選中():
         r = pipe.step()
         assert r.skeleton["player"] is not None, half_w
     assert r.skeleton["player"]["distance_m"] < Settings().depth_near_m
+
+
+def test_單幀離群_時間戳傳入選人器_寬限期內仍選中():
+    class NoDepth(FakeSource):
+        def read(self):
+            f = super().read()
+            f.depth_m = None
+            return f
+
+    det = FakeDetector([make_person(320.0, half_w=57.0)])
+    pipe = Pipeline(NoDepth(), det, lambda: Settings())
+    assert pipe.step().skeleton["player"] is not None
+    det.persons = []  # 掉一幀
+    assert pipe.step().skeleton["player"] is None
+    det.persons = [make_person(320.0, half_w=100.0)]  # 回來時 z≈1.14 m，離上次 > 0.4 m
+    assert pipe.step().skeleton["player"] is not None

@@ -108,3 +108,32 @@ def test_已鎖定的人消失_新人需符合範圍():
     assert sel.select([c(0.0, 2.0)], S) == 0
     # 離上次 > 0.4 m 且 z 在範圍外 -> 不是黏著對象，也不合格
     assert sel.select([c(0.0, 1.2)], S) is None
+
+
+def test_寬限期_候選消失1到2幀後在近界以下回來仍被選中():
+    sel = PlayerSelector()
+    assert sel.select([c(0.0, 2.0)], S, now=0.0) == 0
+    assert sel.select([], S, now=0.033) is None
+    assert sel.select([], S, now=0.066) is None
+    assert sel.select([c(0.0, 1.2)], S, now=0.1) == 0  # 離上次 0.8 m，z < depth_near，仍在寬限期
+
+
+def test_寬限期_單幀離群跳躍仍選最接近者且不限範圍():
+    sel = PlayerSelector()
+    assert sel.select([c(0.0, 2.0)], S, now=0.0) == 0
+    assert sel.select([c(0.0, 1.2), c(0.9, 0.9)], S, now=0.033) == 0  # 兩個都超出 0.4 m；選較近的
+    assert sel.select([c(0.0, 1.9)], S, now=0.066) == 0  # 回到正常位置，黏著恢復
+
+
+def test_寬限期過後_z1點2不選():
+    sel = PlayerSelector()
+    assert sel.select([c(0.0, 2.0)], S, now=0.0) == 0
+    assert sel.select([], S, now=0.5) is None
+    assert sel.select([c(0.0, 1.2)], S, now=0.9) is None  # 距最後一次黏著 0.9 s > 0.8 s
+
+
+def test_寬限期從最後一次黏著起算_離群不延長():
+    sel = PlayerSelector()
+    assert sel.select([c(0.0, 2.0)], S, now=0.0) == 0
+    assert sel.select([c(0.0, 1.2)], S, now=0.5) == 0  # 寬限期內挑中，不刷新時間
+    assert sel.select([c(0.0, 1.2)], S, now=0.9) is None

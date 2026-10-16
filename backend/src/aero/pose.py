@@ -30,6 +30,12 @@ def ensure_model(dest_dir: Path = DATA_DIR / "models") -> Path:
     return dest
 
 
+def _mask_2d(view: np.ndarray) -> np.ndarray:
+    """MediaPipe 給 (H,W,1) float32；types.py 契約是 HxW。"""
+    m = np.array(view, dtype=np.float32)
+    return m[..., 0] if m.ndim == 3 else m
+
+
 class PoseDetector:
     def __init__(self, num_poses: int = 3, model_path: Path | None = None):
         path = model_path if model_path is not None else ensure_model()
@@ -63,7 +69,7 @@ class PoseDetector:
                 world[name] = (wl.x, wl.y, wl.z)
                 visibility[name] = lm.visibility
             # numpy_view 指向 MediaPipe 內部緩衝，必須複製
-            mask = np.array(masks[i].numpy_view(), dtype=np.float32) if i < len(masks) else None
+            mask = _mask_2d(masks[i].numpy_view()) if i < len(masks) else None
             persons.append(PersonPose(pixels=pixels, world=world, visibility=visibility, mask=mask))
         return persons
 

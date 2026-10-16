@@ -124,8 +124,8 @@ def test_開啟分割mask(monkeypatch):
 
 
 def test_每人帶對應index的mask(monkeypatch):
-    m0 = np.zeros((6, 8), np.float32)
-    m1 = np.ones((6, 8), np.float32)
+    m0 = np.zeros((6, 8, 1), np.float32)  # 真 mediapipe 的 numpy_view 是 (H,W,1)
+    m1 = np.ones((6, 8, 1), np.float32)
     det, _ = _detector_with_fake(monkeypatch, [_FakeMaskImage(m0), _FakeMaskImage(m1)])
     persons = det.detect(np.zeros((6, 8, 3), np.uint8), 0)
     assert len(persons) == 2

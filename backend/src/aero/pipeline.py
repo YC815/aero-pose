@@ -56,7 +56,7 @@ class Pipeline:
             cam_to_world(lift_person(p, frame), s.camera_height_m, s.camera_pitch_deg) for p in people
         ]
         centers = [torso_center(w) for w in worlds]
-        idx = self._selector.select(centers, s)
+        idx = self._selector.select(centers, s, frame.ts)
 
         player = None
         if idx is None:

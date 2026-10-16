@@ -94,6 +94,17 @@ perf 5s | camera 30.0Hz step 30.0Hz sent 30.0Hz | wait 2.1 align 8.3 decode 1.6 
 
 用法：寫在 `start.command` 的 `exec` 前面，例如 `export AERO_ORBBEC_ALIGN=hw`。
 
+## 人沒動、數字在跳：`aero jitter`
+
+錄一段趴低不動的影片，再分析每個關節的抖動來源（寬限期幀、visibility 穿越、深度用估值的比例、軀幹俯仰跳動）：
+
+```
+sudo backend/.venv/bin/aero record --source orbbec --name still --seconds 10
+backend/.venv/bin/aero jitter --replay still
+```
+
+結果怎麼讀、對應怎麼處理見 `docs/優化待辦.md`。
+
 ## 設定面板與快捷鍵
 
 | 按鍵 | 作用 |

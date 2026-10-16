@@ -55,6 +55,14 @@ def _measured_depths(p: PersonPose, depth: np.ndarray) -> tuple[dict[str, float 
     return {j: None if d is None or abs(d - torso_depth) > MAX_DEPTH_DEVIATION_M else d for j, d in raw.items()}, torso_depth
 
 
+def measured_joints(p: PersonPose, frame: Frame) -> set[str]:
+    """哪些關節用的是量到的深度（其餘是 MediaPipe 估的 z）。診斷用。"""
+    if frame.depth_m is None:
+        return set()
+    m = _measured_depths(p, frame.depth_m)
+    return set() if m is None else {j for j, d in m[0].items() if d is not None}
+
+
 def _lift_with_depth(p: PersonPose, depth: np.ndarray, k: Intrinsics) -> dict[str, np.ndarray] | None:
     m = _measured_depths(p, depth)
     if m is None:

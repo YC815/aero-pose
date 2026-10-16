@@ -34,6 +34,11 @@ class Pipeline:
         self._filter_params: tuple[float, float] | None = None
         self._held: dict | None = None  # 上一個可信的 player，寬限期內沿用
 
+    @property
+    def selector_mode(self) -> str | None:
+        """最近一次 step 的選人方式（見 selector.Mode）。"""
+        return self._selector.mode
+
     def _joint_filter(self, s: Settings) -> JointFilter:
         params = (s.filter_min_cutoff, s.filter_beta)
         if self._filter is None or self._filter_params != params:  # 設定變更時重建

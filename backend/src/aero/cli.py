@@ -96,6 +96,22 @@ def _cmd_record(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_jitter(args: argparse.Namespace) -> int:
+    from aero.config import load_settings
+    from aero.jitter import analyze
+    from aero.pose import PoseDetector
+    from aero.sources.replay import ReplaySource
+
+    settings = load_settings(DATA_DIR / "settings.json")
+    source = ReplaySource(DATA_DIR / "recordings" / args.replay, loop=False, realtime=False)
+    detector = PoseDetector()
+    try:
+        print(analyze(source, detector, lambda: settings).format())
+    finally:
+        detector.close()
+    return 0
+
+
 def _cmd_doctor(args: argparse.Namespace) -> int:
     from aero.doctor import run
 
@@ -122,6 +138,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_rec.add_argument("--name", required=True)
     p_rec.add_argument("--seconds", type=float, default=20)
     p_rec.set_defaults(func=_cmd_record)
+
+    p_jit = sub.add_parser("jitter", help="分析錄影：人不動時數字在抖的來源")
+    p_jit.add_argument("--replay", metavar="NAME", required=True, help="data/recordings/ 下的資料夾名")
+    p_jit.set_defaults(func=_cmd_jitter)
 
     p_doc = sub.add_parser("doctor", help="相機自檢")
     p_doc.set_defaults(func=_cmd_doctor)

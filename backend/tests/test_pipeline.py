@@ -4,6 +4,7 @@ import numpy as np
 
 from aero.config import Settings
 from aero.pipeline import Pipeline
+from aero.selector import GRACE_S
 from aero.types import JOINTS, Frame, Intrinsics, PersonPose
 
 K = Intrinsics(fx=600, fy=600, cx=320, cy=240, width=640, height=480)
@@ -121,38 +122,70 @@ def test_超出深度範圍_player為None():
     assert r.persons[0]["selected"] is False
 
 
-def test_濾波生效_且換人時reset():
-    s = FakeSource()
-    det = FakeDetector([make_person(320.0)])
-    pipe = Pipeline(s, det, lambda: Settings())
-    pipe.step()
-    # 同一人橫移 0.05 m 內：有被平滑（不等於原始）
-    det.persons = [make_person(320.0 + 30.0)]  # 2.0*30/600 = 0.1 m
-    r = pipe.step()
-    x = r.skeleton["player"]["joints"]["left_hip"][0]
-    raw_x = (320.0 + 30.0 + 57.0 * 0.7 - 320.0) / 600 * 2.0
-    assert x < raw_x - 1e-4
-    # 換人：跳 0.5 m -> reset，輸出等於原始
-    det.persons = [make_person(320.0 + 170.0)]  # 0.567 m，跳 > 0.4 m
-    r = pipe.step()
-    x = r.skeleton["player"]["joints"]["left_hip"][0]
-    raw_x = (320.0 + 170.0 + 57.0 * 0.7 - 320.0) / 600 * 2.0
-    assert abs(x - raw_x) < 1e-6
+def _hip_x(r):
+    return r.skeleton["player"]["joints"]["left_hip"][0]
 
 
-def test_選中者消失_重設濾波器():
+def _raw_hip_x(cx_px):
+    return (cx_px + 57.0 * 0.7 - 320.0) / 600 * 2.0
+
+
+def test_濾波生效():
     det = FakeDetector([make_person(320.0)])
     pipe = Pipeline(FakeSource(), det, lambda: Settings())
     pipe.step()
+    # 同一人橫移 0.1 m（< 黏著半徑）：有被平滑（不等於原始）
     det.persons = [make_person(320.0 + 30.0)]
+    assert _hip_x(pipe.step()) < _raw_hip_x(350.0) - 1e-4
+
+
+def test_單幀離群_沿用上一個骨架_不重設濾波器():
+    det = FakeDetector([make_person(320.0)])
+    pipe = Pipeline(FakeSource(), det, lambda: Settings())
     pipe.step()
-    det.persons = []  # 玩家消失
-    assert pipe.step().skeleton["player"] is None
-    det.persons = [make_person(320.0 + 60.0)]  # 回來：中心離最後位置 < 0.4 m，但濾波器應已重設
+    det.persons = [make_person(350.0)]
+    before = _hip_x(pipe.step())
+    det.persons = [make_person(490.0)]  # 跳 0.57 m（> 黏著半徑）：寬限期，沿用上一個骨架
     r = pipe.step()
-    x = r.skeleton["player"]["joints"]["left_hip"][0]
-    raw_x = (320.0 + 60.0 + 57.0 * 0.7 - 320.0) / 600 * 2.0
-    assert abs(x - raw_x) < 1e-6
+    assert _hip_x(r) == before
+    assert r.persons[0]["selected"] is True  # 畫面上仍標示為玩家
+    det.persons = [make_person(360.0)]  # 回到原位：濾波器狀態還在，輸出仍被平滑
+    assert _hip_x(pipe.step()) < _raw_hip_x(360.0) - 1e-4
+
+
+def test_單幀消失_沿用上一個骨架():
+    det = FakeDetector([make_person(320.0)])
+    pipe = Pipeline(FakeSource(), det, lambda: Settings())
+    first = pipe.step().skeleton["player"]
+    det.persons = []
+    r = pipe.step()
+    assert r.skeleton["player"] == first
+    assert r.selected_mask is None and r.persons == []
+    det.persons = [make_person(350.0)]
+    assert _hip_x(pipe.step()) < _raw_hip_x(350.0) - 1e-4
+
+
+def test_寬限期過了_放掉玩家並重設濾波器():
+    det = FakeDetector([make_person(320.0)])
+    pipe = Pipeline(FakeSource(), det, lambda: Settings())
+    pipe.step()
+    det.persons = []
+    frames = int(GRACE_S * 30) + 2  # FakeSource 每幀 1/30 s
+    for _ in range(frames):
+        r = pipe.step()
+    assert r.skeleton["player"] is None
+    det.persons = [make_person(350.0)]  # 回來：重新鎖定，濾波器從頭開始，輸出等於原始
+    assert abs(_hip_x(pipe.step()) - _raw_hip_x(350.0)) < 1e-6
+
+
+def test_持續跳開超過寬限期_改鎖新位置():
+    det = FakeDetector([make_person(320.0)])
+    pipe = Pipeline(FakeSource(), det, lambda: Settings())
+    pipe.step()
+    det.persons = [make_person(490.0)]
+    for _ in range(int(GRACE_S * 30) + 2):
+        r = pipe.step()
+    assert abs(_hip_x(r) - _raw_hip_x(490.0)) < 1e-6
 
 
 def test_selected_mask_傳遞選中者的mask():
@@ -205,7 +238,7 @@ def test_單幀離群_時間戳傳入選人器_寬限期內仍選中():
     det = FakeDetector([make_person(320.0, half_w=57.0)])
     pipe = Pipeline(NoDepth(), det, lambda: Settings())
     assert pipe.step().skeleton["player"] is not None
-    det.persons = []  # 掉一幀
-    assert pipe.step().skeleton["player"] is None
+    det.persons = []  # 掉一幀：寬限期內沿用上一個骨架
+    assert pipe.step().skeleton["player"] is not None
     det.persons = [make_person(320.0, half_w=100.0)]  # 回來時 z≈1.14 m，離上次 > 0.4 m
     assert pipe.step().skeleton["player"] is not None

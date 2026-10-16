@@ -23,29 +23,48 @@ def _unproject(u: float, v: float, z: float, k: Intrinsics) -> np.ndarray:
     return np.array([(u - k.cx) / k.fx * z, (v - k.cy) / k.fy * z, z])
 
 
-def _sample_depth(depth: np.ndarray, u: float, v: float) -> float | None:
-    """7x7 鄰域有效深度（>0）的中位數；沒有有效值回 None。"""
+def _sample_depth(depth: np.ndarray, u: float, v: float, mask: np.ndarray | None = None) -> float | None:
+    """7x7 鄰域有效深度（>0）的中位數；沒有有效值回 None。
+
+    給了 mask（該人的分割，與 depth 同尺寸）時，優先只用 mask 內的像素：關節在身體輪廓邊緣時，
+    鄰域一半是背景，中位數會在身體和背景之間跳。mask 內沒有有效值（細手臂常被 mask 漏掉）才退回整個鄰域。
+    """
     h, w = depth.shape
     ui, vi = int(round(u)), int(round(v))
     if not (0 <= ui < w and 0 <= vi < h):  # 中心在畫面外：沒有量測，交給 fallback
         return None
     r = NEIGHBOURHOOD
-    patch = depth[max(vi - r, 0) : min(vi + r + 1, h), max(ui - r, 0) : min(ui + r + 1, w)]
-    valid = patch[patch > 0]
-    return float(np.median(valid)) if valid.size else None
+    rows, cols = slice(max(vi - r, 0), min(vi + r + 1, h)), slice(max(ui - r, 0), min(ui + r + 1, w))
+    patch = depth[rows, cols]
+    valid = patch > 0
+    if mask is not None:
+        on_body = valid & (mask[rows, cols] > 0.5)
+        if on_body.any():
+            valid = on_body
+    return float(np.median(patch[valid])) if valid.any() else None
 
 
-def _lift_with_depth(p: PersonPose, depth: np.ndarray, k: Intrinsics) -> dict[str, np.ndarray] | None:
-    raw = {j: _sample_depth(depth, *p.pixels[j]) for j in JOINTS}
+def _measured_depths(p: PersonPose, depth: np.ndarray) -> tuple[dict[str, float | None], float] | None:
+    """每個關節量到的深度（量不到或離軀幹太遠為 None）與軀幹深度；軀幹四點都量不到回 None。"""
+    mask = p.mask if p.mask is not None and p.mask.shape == depth.shape else None
+    raw = {j: _sample_depth(depth, *p.pixels[j], mask) for j in JOINTS}
     torso_d = [raw[j] for j in _TORSO if raw[j] is not None]
     if not torso_d:
         return None
     torso_depth = float(np.median(torso_d))
+    return {j: None if d is None or abs(d - torso_depth) > MAX_DEPTH_DEVIATION_M else d for j, d in raw.items()}, torso_depth
+
+
+def _lift_with_depth(p: PersonPose, depth: np.ndarray, k: Intrinsics) -> dict[str, np.ndarray] | None:
+    m = _measured_depths(p, depth)
+    if m is None:
+        return None
+    raw, torso_depth = m
     torso_world_z = float(np.mean([p.world[j][2] for j in _TORSO]))
     out = {}
     for j in JOINTS:
         d = raw[j]
-        if d is None or abs(d - torso_depth) > MAX_DEPTH_DEVIATION_M:
+        if d is None:
             d = torso_depth + (p.world[j][2] - torso_world_z)
         out[j] = _unproject(*p.pixels[j], d, k)
     return out

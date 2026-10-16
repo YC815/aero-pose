@@ -1,7 +1,7 @@
 import numpy as np
 
 from aero.config import Settings
-from aero.selector import PlayerSelector, torso_center
+from aero.selector import GRACE_S, PlayerSelector, torso_center
 from aero.types import JOINTS
 
 S = Settings()  # 1.5~3.0 m、站位 0±0.6
@@ -137,3 +137,19 @@ def test_寬限期從最後一次黏著起算_離群不延長():
     assert sel.select([c(0.0, 2.0)], S, now=0.0) == 0
     assert sel.select([c(0.0, 1.2)], S, now=0.5) == 0  # 寬限期內挑中，不刷新時間
     assert sel.select([c(0.0, 1.2)], S, now=0.9) is None
+
+
+def test_mode_新鎖定_黏著_寬限_失去():
+    sel = PlayerSelector()
+    assert sel.select([], S, 0.0) is None and sel.mode is None
+    assert sel.select([c(0, 2.0)], S, 0.0) == 0 and sel.mode == "new"
+    assert sel.select([c(0.1, 2.0)], S, 0.1) == 0 and sel.mode == "track"
+    assert sel.select([c(1.0, 2.0)], S, 0.2) == 0 and sel.mode == "hold"  # 離群：寬限期內仍選最近者
+    assert sel.select([], S, 0.3) is None and sel.mode == "hold"
+    assert sel.select([], S, 0.1 + GRACE_S + 0.01) is None and sel.mode is None
+
+
+def test_mode_寬限期過後_同一幀可新鎖定():
+    sel = PlayerSelector()
+    sel.select([c(0, 2.0)], S, 0.0)
+    assert sel.select([c(0.5, 2.0)], S, GRACE_S + 0.1) == 0 and sel.mode == "new"

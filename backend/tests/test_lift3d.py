@@ -122,3 +122,31 @@ def test_有深度圖但軀幹四點皆無效_走無深度路徑():
     out = lift_person(_person(px), _frame(depth))
     # 肩寬 114 px、fx=600 -> d=2.0；world 全 0 -> 所有關節 z=2.0
     np.testing.assert_allclose(out["left_hip"], (0, 0, 2.0), atol=1e-6)
+
+
+def test_關節在輪廓邊緣_只取mask內的深度():
+    # 手腕右邊 4 欄是 2.5 m 的「背景」（差 0.5 m，躲過 0.6 m 的離群門檻），7x7 裡背景占多數
+    depth = np.full((480, 1280), 2.0, np.float32)
+    depth[:, 411:] = 2.5
+    mask = np.zeros((480, 1280), np.float32)
+    mask[:, :411] = 1.0
+    p = _person(_pixels(left_wrist=(412.0, 240.0)))
+    assert abs(lift_person(p, _frame(depth))["left_wrist"][2] - 2.5) < 1e-6  # 沒 mask：被背景帶走
+    p.mask = mask
+    assert abs(lift_person(p, _frame(depth))["left_wrist"][2] - 2.0) < 1e-6
+
+
+def test_mask沒蓋到關節_退回整個鄰域():
+    depth = np.full((480, 1280), 2.0, np.float32)
+    depth[225:256, 400:431] = 1.8  # 手往前伸 0.2 m，但 mask 漏掉這隻手
+    p = _person(_pixels(left_wrist=(415.0, 240.0)))
+    p.mask = np.zeros((480, 1280), np.float32)
+    p.mask[200:300, 300:360] = 1.0  # 只蓋到軀幹
+    assert abs(lift_person(p, _frame(depth))["left_wrist"][2] - 1.8) < 1e-6
+
+
+def test_mask尺寸和深度不同_忽略mask():
+    depth = np.full((480, 1280), 2.0, np.float32)
+    p = _person(_pixels())
+    p.mask = np.zeros((10, 10), np.float32)
+    assert abs(lift_person(p, _frame(depth))["nose"][2] - 2.0) < 1e-6

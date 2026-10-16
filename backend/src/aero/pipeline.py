@@ -16,9 +16,6 @@ from aero.sources.base import FrameSource
 from aero.tilt import cam_to_world
 from aero.types import PersonPose, StepResult
 
-IDENTITY_JUMP_M = 0.4
-
-
 class Detector(Protocol):
     def detect(self, rgb: np.ndarray, ts_ms: int) -> list[PersonPose]: ...
 
@@ -35,17 +32,13 @@ class Pipeline:
         self._selector = PlayerSelector()
         self._filter: JointFilter | None = None
         self._filter_params: tuple[float, float] | None = None
-        self._last_center: np.ndarray | None = None
+        self._held: dict | None = None  # 上一個可信的 player，寬限期內沿用
 
     def _joint_filter(self, s: Settings) -> JointFilter:
         params = (s.filter_min_cutoff, s.filter_beta)
         if self._filter is None or self._filter_params != params:  # 設定變更時重建
             self._filter, self._filter_params = JointFilter(*params), params
         return self._filter
-
-    def _reset_tracking(self) -> None:
-        self._filter = None
-        self._last_center = None
 
     def step(self) -> StepResult | None:
         frame = self._source.read()
@@ -62,19 +55,19 @@ class Pipeline:
         centers = [torso_center(w) for w in worlds]
         idx = self._selector.select(centers, s, frame.ts)
 
-        player = None
-        if idx is None:
-            self._reset_tracking()
-        else:
-            if self._last_center is not None and np.linalg.norm(centers[idx] - self._last_center) > IDENTITY_JUMP_M:
-                self._filter = None
-            self._last_center = centers[idx]
+        # 只有新鎖定（換人）和失去鎖定才重來。寬限期（掉幀、離群值）不碰濾波器，沿用上一個可信的骨架：
+        # 否則一個壞幀就清掉濾波狀態，下一幀直接輸出沒平滑的原始值。
+        mode = self._selector.mode
+        if mode in ("new", None):
+            self._filter, self._held = None, None
+        if mode in ("new", "track"):
             joints = self._joint_filter(s)(worlds[idx], frame.ts)
-            player = {
+            self._held = {
                 "distance_m": float(centers[idx][2]),
                 "joints": {j: _vec(v) for j, v in joints.items()},
                 "visibility": {j: float(v) for j, v in people[idx].visibility.items()},
             }
+        player = self._held
 
         persons = []
         for i, p in enumerate(people):

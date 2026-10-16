@@ -216,4 +216,49 @@ describe('Game', () => {
     h.run(0.4, armsUp);
     expect(h.game.state).toBe('COUNTDOWN');
   });
+
+  it('沒有玩家時 forceStart，下一個 update 仍在 COUNTDOWN', () => {
+    const h = new Harness();
+    h.run(5, null); // 舊的 lostSince 已累積
+    h.game.forceStart(h.now);
+    expect(h.tick(null)).toBe('COUNTDOWN');
+    h.run(2, null);
+    expect(h.game.state).toBe('COUNTDOWN');
+  });
+
+  it('COUNTDOWN → RECORDING 不重設遺失計時（連續消失）', () => {
+    const settings = { ...DEFAULT_SETTINGS, countdown_s: 2, lost_timeout_s: 3 };
+    const h = new Harness(settings);
+    h.toCountdown();
+    h.run(1.5, null);
+    expect(h.game.state).toBe('COUNTDOWN');
+    h.runUntil('RECORDING', null, 1);
+    expect(h.game.state).toBe('RECORDING');
+    expect(h.runUntil('ATTRACT', null, 3)).toBeCloseTo(1.1, 6); // 第一個 null 在進入後 0.1 s，連續消失 3 s
+  });
+
+  it('錄滿與遺失同時成立 → 錄滿優先，進 RESULT', () => {
+    const settings = { ...DEFAULT_SETTINGS, record_s: 5, lost_timeout_s: 3 };
+    const h = new Harness(settings);
+    h.toRecording();
+    h.run(2, standing);
+    // 最後 3 秒都沒玩家：第 5 秒時同時滿足兩個條件
+    h.run(2.9, null);
+    expect(h.game.state).toBe('RECORDING');
+    h.tick(null);
+    expect(h.game.state).toBe('RESULT');
+    expect(h.transitions.at(-1)).toEqual(['RECORDING', 'RESULT']);
+  });
+
+  it('進入 RESULT 時保留 recordElapsed = record_s、recordLeft = 0；回 ATTRACT 後歸零', () => {
+    const h = new Harness();
+    h.toRecording();
+    h.runUntil('RESULT', standing, 11);
+    expect(h.game.recordElapsed).toBe(DEFAULT_SETTINGS.record_s);
+    expect(h.game.recordLeft).toBe(0);
+    h.run(1, standing);
+    expect(h.game.recordElapsed).toBe(DEFAULT_SETTINGS.record_s);
+    h.runUntil('ATTRACT', standing, 12);
+    expect(h.game.recordElapsed).toBe(0);
+  });
 });

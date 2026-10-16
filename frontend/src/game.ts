@@ -45,6 +45,11 @@ export class Game {
     // 失去玩家：連續計時，有玩家就歸零
     if (player) this.lostSince = null;
     else this.lostSince ??= now;
+    // 錄滿優先於失去玩家：成績不能因為最後一刻的遺失而丟掉
+    if (this.state === 'RECORDING' && now - this.enteredAt >= s.record_s - EPS) {
+      this.enter('RESULT', now);
+      return this.state;
+    }
     if (TRACKED.includes(this.state) && elapsed(now, this.lostSince) >= s.lost_timeout_s - EPS) {
       this.enter('ATTRACT', now);
       return this.state;
@@ -73,7 +78,6 @@ export class Game {
       case 'RECORDING':
         this.recordElapsed = Math.min(s.record_s, inState);
         this.recordLeft = Math.max(0, s.record_s - inState);
-        if (inState >= s.record_s - EPS) this.enter('RESULT', now);
         break;
 
       case 'RESULT':
@@ -95,11 +99,16 @@ export class Game {
     this.state = to;
     this.enteredAt = now;
 
+    // 「連續消失」只在追蹤狀態內累計；從非追蹤狀態進入時不沿用舊的 lostSince
+    if (TRACKED.includes(to) && !TRACKED.includes(from)) this.lostSince = null;
+
     this.handsUpSince = null;
     this.startProgress = 0;
     this.countdownLeft = s.countdown_s;
-    this.recordElapsed = 0;
-    this.recordLeft = s.record_s;
+    // 錄滿進 RESULT 時保留 recordElapsed = record_s，讓呼叫端能 push 最後一筆（t = record_s）
+    const finished = from === 'RECORDING' && to === 'RESULT';
+    this.recordElapsed = finished ? s.record_s : 0;
+    this.recordLeft = finished ? 0 : s.record_s;
     this.resultLeft = s.result_s;
 
     this.onTransition?.(from, to);

@@ -1,58 +1,62 @@
-// 入口：WS 骨架 → retarget → 騎士；Game 狀態機驅動 UI；定格 → 面積 → 結果畫面 → POST。
+// 入口：WS frame → 全螢幕鏡像相機；skeleton → retarget → tracker → 後台標準騎士計分；
+// Game 狀態機驅動 UI；RESULT 才把 3D 騎士放進結果頁重播這 10 秒，並 POST 成績。
 import './style.css';
+import { maskToImageData } from './area';
+import { CameraView } from './camera';
 import { Game } from './game';
 import { createApi } from './net/api';
 import { connectWS, defaultWsUrl } from './net/ws';
-import { AERO_DEMO_POSE, UPRIGHT_POSE } from './poses';
-import { approachPose, lerpPose } from './retarget';
-import { FREEZE_CRANK_ANGLE } from './rider';
-import { alignMasks, createMeasurer, createScene, FREEZE_FRAMES, freezeResult } from './scene';
-import { DEFAULT_SETTINGS, type GameState, type PlayerSkeleton, type RiderPose, type Settings } from './types';
+import { UPRIGHT_POSE } from './poses';
+import { createMeasurer, createReplayView, poseForSample, replayPose } from './scene';
+import { RecordingSession } from './session';
+import { PoseTracker } from './tracker';
+import { DEFAULT_SETTINGS, type GameState, type PlayerSkeleton, type SessionSummary, type Settings } from './types';
 import { AttractScreen } from './ui/attract';
 import { renderResultCard } from './ui/card';
 import { Hud } from './ui/hud';
 import { MaintenanceScreen } from './ui/maintenance';
 import { ResultScreen, type ResultView } from './ui/result';
 import { SettingsPanel } from './ui/settings';
-import { PoseTracker } from './tracker';
 import { keepScreenAwake } from './wakelock';
-import { Wind } from './wind';
+import { WindField } from './windfield';
 
-const LIVE_AREA_INTERVAL_S = 0.25; // triangles() 每次約 430 KB，不准每幀算
 const LEADERBOARD_INTERVAL_S = 30;
-const DEMO_HALF_PERIOD_S = 4; // 示範動畫：坐直 → 趴低 4 秒，再回來 4 秒
-const DEMO_TAU_S = 0.25; // 示範姿勢的平滑（從定格或玩家姿勢切回示範時不跳）
-const CADENCE_RAD_S = 1.5 * 2 * Math.PI; // 90 rpm，純視覺
+const HUD_INTERVAL_S = 0.1; // RECORDING 即時數字約 10 Hz
+const CADENCE_RAD_S = 1.5 * 2 * Math.PI; // 重播時踩踏 90 rpm，純視覺
 const SKELETON_STALE_S = 1; // 超過這麼久沒收到骨架，就當作沒有玩家
 const DEV = new URLSearchParams(location.search).get('dev') === '1';
-const FOLLOW: readonly GameState[] = ['READY', 'POSING', 'COUNTDOWN'];
 
 const clock = (): number => performance.now() / 1000;
-
-// ---- 3D ----
-const app = document.getElementById('app') as HTMLElement;
-const view = createScene(app);
-const rider = view.rider;
-const wind = new Wind();
-view.scene.add(wind.object3d);
-const measurer = createMeasurer();
-const baseline = measurer.measure(UPRIGHT_POSE); // 坐直基準只算一次
 
 // ---- 狀態（設定一律以伺服器的 settings 訊息為準） ----
 let settings: Settings = { ...DEFAULT_SETTINGS };
 let wsUp = false;
-let camera: 'ok' | 'disconnected' = 'disconnected';
+let cameraStatus: 'ok' | 'disconnected' = 'disconnected';
 let player: PlayerSkeleton | null = null;
 let playerAt = -Infinity;
-const tracker = new PoseTracker(FREEZE_FRAMES); // 跟隨目標 + 定格緩衝（軀幹被擋的幀不算數）
-let pose: RiderPose = UPRIGHT_POSE; // 畫面上騎士目前的姿勢
-let crank = FREEZE_CRANK_ANGLE;
-let demoT = 0;
-let nextLiveArea = 0;
+let playerShown = false;
 let nextBoard = 0;
+let nextHud = 0;
 let maintReason = '';
+let session: RecordingSession | null = null;
+let replay: { summary: SessionSummary; startAt: number; crank: number } | null = null;
+
+// 後台計分：標準騎士＋固定曲柄。坐直基準只算一次。
+const measurer = createMeasurer();
+const baseline = measurer.measure(UPRIGHT_POSE);
+const tracker = new PoseTracker(1); // 只用跟隨目標（軀幹被擋時保留上一個有效姿勢）
 
 keepScreenAwake(); // 無人攤位：螢幕不能睡
+
+// ---- 畫面圖層：相機（0）→ 風流（1）→ UI（10+）；3D 重播在結果頁的 replaySlot 裡 ----
+const app = document.getElementById('app') as HTMLElement;
+const cam = new CameraView(app);
+const wind = new WindField(app, cam);
+const attract = new AttractScreen(app);
+const hud = new Hud(app);
+const result = new ResultScreen(app);
+const maintenance = new MaintenanceScreen(app);
+const replayView = createReplayView(result.replaySlot);
 
 // ---- 網路 ----
 const api = createApi();
@@ -77,17 +81,22 @@ const ws = connectWS(defaultWsUrl(), {
   },
   onClose: () => {
     wsUp = false;
-    camera = 'disconnected';
-    player = null;
+    cameraStatus = 'disconnected';
+    player = null; // 相機畫面停在最後一格，MAINTENANCE 會蓋上去
   },
   onMessage: (m) => {
     try {
       switch (m.type) {
+        case 'frame':
+          cam.setFrame(m);
+          break;
         case 'skeleton':
-          onSkeleton(m.player);
+          player = m.player;
+          playerAt = clock();
+          tracker.push(m.player, playerAt, settings.torso_gain);
           break;
         case 'status':
-          camera = m.camera;
+          cameraStatus = m.camera;
           break;
         case 'settings':
           settings = { ...DEFAULT_SETTINGS, ...m.settings };
@@ -103,39 +112,51 @@ const ws = connectWS(defaultWsUrl(), {
   },
 });
 
-function onSkeleton(p: PlayerSkeleton | null): void {
-  player = p;
-  playerAt = clock();
-  tracker.push(p, playerAt, settings.torso_gain);
-}
-
-// ---- UI ----
-const attract = new AttractScreen(app);
-const hud = new Hud(app);
-const result = new ResultScreen(app);
-const maintenance = new MaintenanceScreen(app);
 const panel = new SettingsPanel(app, { ws, api });
 
+// ---- 狀態轉移 ----
 const game = new Game(() => settings);
-game.onTransition = (_from, to) => enterUi(to);
-enterUi(game.state);
+game.onTransition = (from, to) => enterUi(from, to);
+enterUi(game.state, game.state);
 
-function enterUi(to: GameState): void {
+function enterUi(from: GameState, to: GameState): void {
   if (to === 'ATTRACT') attract.show();
   else attract.hide();
-  hud.show(to); // READY / POSING / COUNTDOWN 以外等同 hide
-  if (to !== 'RESULT') result.hide();
+  if (to === 'COUNTDOWN') hud.showCountdown();
+  else if (to === 'RECORDING') hud.showRecording(settings.record_s);
+  else hud.hide();
+  if (to !== 'RESULT') {
+    result.hide();
+    replay = null;
+  }
   if (to === 'MAINTENANCE') showMaintenance();
   else maintenance.hide();
-  wind.setActive(to === 'POSING' || to === 'COUNTDOWN');
+  wind.setActive(to === 'COUNTDOWN' || to === 'RECORDING');
+  cam.setDimmed(to === 'RESULT');
 
-  if (to === 'ATTRACT') refreshBoard();
-  if (to === 'READY') tracker.clear(); // 不讓上一位玩家的幀混進定格
-  if (to === 'POSING') {
-    hud.setLiveArea(null);
-    nextLiveArea = 0;
+  if (to === 'ATTRACT') {
+    playerShown = false;
+    attract.setPlayerPresent(false);
+    refreshBoard();
   }
-  if (to === 'RESULT') showResult();
+  // 離開 RECORDING 就丟掉 session：中止（玩家消失、斷線）不記成績，錄滿的交給結果頁
+  const done = session;
+  session = null;
+  if (to === 'RECORDING') {
+    session = new RecordingSession({
+      baselineM2: baseline.areaM2,
+      measure: (p) => measurer.measure(p).areaM2,
+      settings: () => settings,
+    });
+    nextHud = 0;
+  }
+  if (to === 'RESULT' && from === 'RECORDING' && done) {
+    try {
+      showResult(done);
+    } catch (e) {
+      console.error('產生結果失敗', e); // 結果頁空白到 result_s 結束，之後回待機
+    }
+  }
 }
 
 function maintText(): string {
@@ -155,93 +176,85 @@ function refreshBoard(): void {
   );
 }
 
-function showResult(): void {
-  // 一幀有效姿勢都沒有（整段軀幹被擋）時用畫面上的姿勢：hold 過後它已經緩回坐直
-  const r = freezeResult(tracker.recent, pose, measurer, baseline, settings);
-  pose = r.pose;
-  rider.setPose(pose);
-  crank = FREEZE_CRANK_ANGLE;
-  rider.setCrankAngle(crank);
+function showResult(rec: RecordingSession): void {
+  const now = clock();
+  // Game 錄滿進 RESULT 時保留 recordElapsed = record_s：補上 t = record_s 的最後一筆（共 101 筆）
+  rec.push(tracker.target(now), game.recordElapsed);
+  const summary = rec.summary(settings.record_s);
 
-  const masks = alignMasks(r.player, baseline);
-  const v: ResultView = {
-    playerMask: new ImageData(masks.a, masks.width, masks.height),
-    baselineMask: new ImageData(masks.b, masks.width, masks.height),
-    areaM2: r.areaM2,
-    baselineM2: r.baselineM2,
-    pct: r.pct,
-    watts: r.watts,
-    speedKmh: settings.speed_kmh,
-  };
-  const session = result.show(v);
-  void submit(v, session);
+  const best = summary.samples[summary.bestIndex];
+  const bestPose = poseForSample(summary.poses, best.t) ?? UPRIGHT_POSE;
+  // frontalArea 的 mask 原樣給 card.ts（第 0 列在上、白色不透明）
+  const bestMask = maskToImageData(measurer.measure(bestPose), [255, 255, 255, 255]);
+
+  const v: ResultView = { summary, bestMask, speedKmh: settings.speed_kmh };
+  const id = result.show(v);
+  replayView.resize(); // show() 之後版面才確定
+  replay = { summary, startAt: now, crank: 0 };
+  void submit(v, id);
 }
 
-async function submit(v: ResultView, session: number): Promise<void> {
+async function submit(v: ResultView, id: number): Promise<void> {
+  const s = v.summary;
   try {
     const png = await renderResultCard(v);
     const res = await api.postResult({
-      area_m2: v.areaM2,
-      baseline_m2: v.baselineM2,
-      watts_saved: v.watts,
+      area_m2: s.meanAreaM2,
+      baseline_m2: s.baselineM2,
+      watts_saved: s.meanWatts,
       png_b64: png,
     });
-    result.setServerInfo({ number: res.number, rank: res.rank, qrUrl: res.qr_url }, session);
+    result.setServerInfo({ number: res.number, rank: res.rank, qrUrl: res.qr_url }, id);
   } catch (e) {
     console.warn('送出結果失敗', e);
-    result.setServerInfo(null, session); // 照常顯示結果，只是沒有名次和 QR
+    result.setServerInfo(null, id); // 照常顯示結果，只是沒有名次和 QR
   }
   refreshBoard();
 }
 
 // ---- 每幀 ----
-const smooth01 = (t: number): number => t * t * (3 - 2 * t);
-
-function demoPose(dt: number): RiderPose {
-  demoT += dt;
-  const phase = (demoT % (2 * DEMO_HALF_PERIOD_S)) / DEMO_HALF_PERIOD_S;
-  return lerpPose(UPRIGHT_POSE, AERO_DEMO_POSE, smooth01(phase < 1 ? phase : 2 - phase));
+function stepAttract(now: number, fresh: PlayerSkeleton | null): void {
+  if (playerShown !== (fresh !== null)) {
+    playerShown = fresh !== null;
+    attract.setPlayerPresent(playerShown);
+  }
+  if (playerShown) attract.setStartProgress(game.startProgress);
+  if (now >= nextBoard) refreshBoard();
 }
 
-/** 即時面積（節流）：量測用騎士，曲柄固定，不受畫面上的踩踏影響。 */
-function liveArea(now: number): number | null {
-  if (now < nextLiveArea) return null;
-  nextLiveArea = now + LIVE_AREA_INTERVAL_S;
-  return measurer.measure(pose).areaM2;
+function stepRecording(now: number): void {
+  if (!session) return;
+  // 每幀都 push（玩家消失時 tracker 會給坐直）；session 每 0.1 s 才 measure 一次
+  session.push(tracker.target(now), game.recordElapsed);
+  if (now < nextHud) return;
+  nextHud = now + HUD_INTERVAL_S;
+  hud.setWatts(session.latestWatts());
+  hud.setTimeLeft(game.recordLeft);
+  hud.setSamples(session.samples);
+}
+
+function stepReplay(now: number, dt: number): void {
+  if (!replay) return;
+  const { summary } = replay;
+  const dur = summary.durationS > 0 ? summary.durationS : 1;
+  const t = (now - replay.startAt) % dur;
+  replayView.rider.setPose(replayPose(summary.poses, t) ?? UPRIGHT_POSE);
+  replay.crank = (replay.crank + CADENCE_RAD_S * dt) % (2 * Math.PI);
+  replayView.rider.setCrankAngle(replay.crank);
+  replayView.render();
+  result.setPlayhead(t);
 }
 
 function step(now: number, dt: number): void {
   const fresh = player && now - playerAt <= SKELETON_STALE_S ? player : null;
-  const state = game.update({ now, player: fresh, cameraOk: wsUp && camera === 'ok' });
+  const state = game.update({ now, player: fresh, cameraOk: wsUp && cameraStatus === 'ok' });
 
-  if (state === 'ATTRACT') {
-    pose = approachPose(pose, demoPose(dt), dt, DEMO_TAU_S);
-    const a = liveArea(now);
-    if (a !== null) attract.setLiveArea(a);
-    if (now >= nextBoard) refreshBoard();
-  } else if (FOLLOW.includes(state)) {
-    // 軀幹被擋時先保留上一個有效姿勢 0.3 秒，之後 approachPose（τ = 0.1 s）緩回坐直
-    pose = approachPose(pose, fresh ? tracker.target(now) : UPRIGHT_POSE, dt);
-  } else if (state === 'MAINTENANCE') {
-    pose = approachPose(pose, UPRIGHT_POSE, dt);
-    if (maintReason !== maintText()) showMaintenance();
-  }
+  if (state === 'ATTRACT') stepAttract(now, fresh);
+  else if (state === 'COUNTDOWN') hud.setCountdown(game.countdownLeft);
+  else if (state === 'RECORDING') stepRecording(now);
+  else if (state === 'RESULT') stepReplay(now, dt);
+  else if (state === 'MAINTENANCE' && maintReason !== maintText()) showMaintenance();
 
-  if (state === 'READY') hud.setStartProgress(game.startProgress);
-  if (state === 'POSING') {
-    hud.setStillProgress(game.stillProgress);
-    hud.setPosingLeft(game.posingLeft);
-    const a = liveArea(now);
-    if (a !== null) hud.setLiveArea(a);
-  }
-  if (state === 'COUNTDOWN') hud.setCountdown(game.countdownLeft);
-
-  // RESULT：姿勢和曲柄都定格，不動
-  if (state !== 'RESULT') {
-    rider.setPose(pose);
-    crank = (crank + CADENCE_RAD_S * dt) % (2 * Math.PI);
-    rider.setCrankAngle(crank);
-  }
   wind.update(dt);
 }
 
@@ -252,7 +265,6 @@ function frame(): void {
   last = now;
   try {
     step(now, dt);
-    view.render();
   } catch (e) {
     console.error('畫面更新失敗', e); // 無人顧：記下來，下一幀繼續
   }
@@ -269,6 +281,6 @@ window.addEventListener('keydown', (e) => {
   }
   if (DEV && e.code === 'Space' && !e.repeat && !panel.open) {
     e.preventDefault();
-    game.forceCountdown(clock());
+    game.forceStart(clock());
   }
 });

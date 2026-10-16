@@ -282,38 +282,238 @@ body {
   display: none;
 }
 
-.ap-steps {
-  display: grid;
-  gap: 1.3vh;
+/* 待機輪播（ui/tour.ts）：沒人時循環播目的與玩法；有玩家站上來就收起，只留舉手提示 */
+.ap-tour {
+  position: relative;
+  width: 50vw;
+  height: 32vh;
   margin-top: 4vh;
-  list-style: none;
-}
-
-.ap-steps li {
-  display: flex;
-  align-items: center;
-  gap: 1.2vw;
-  width: fit-content;
-  padding: 1.1vh 2vw 1.1vh 1.1vh;
+  box-sizing: border-box;
+  padding: 2.4vh 2.2vw 4.2vh;
   border: 1px solid var(--ap-line);
-  border-radius: 10vh;
+  border-radius: 2.4vh;
   background: var(--ap-panel);
-  font-size: 3.2vh;
-  font-weight: 700;
 }
 
-.ap-steps b {
+.ap-attract.is-present .ap-tour {
+  display: none;
+}
+
+.ap-tour__slide {
+  display: none;
+  height: 100%;
+  align-items: center;
+  gap: 2.4vw;
+}
+
+.ap-tour__slide.is-active {
+  display: flex;
+  animation: ap-tour-in 0.5s var(--ap-ease) both;
+}
+
+.ap-tour__art {
   display: grid;
   flex: none;
   place-items: center;
-  width: 4.8vh;
-  height: 4.8vh;
-  border-radius: 50%;
-  background: var(--ap-wind);
-  color: var(--ap-bg);
-  font-family: var(--ap-font-num);
-  font-size: 2.9vh;
+  width: 24vh;
+  height: 24vh;
+}
+
+.ap-tour__morph {
+  height: 100%;
+  width: auto;
+  max-width: 100%;
+}
+
+.ap-tour__kicker {
+  font-size: 2.4vh;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  color: var(--ap-wind);
+}
+
+.ap-tour__title {
+  margin-top: 0.6vh;
+  font-size: 4.6vh;
   font-weight: 900;
+  line-height: 1.15;
+  white-space: nowrap;
+  text-shadow: var(--ap-shadow);
+}
+
+.ap-tour__cap {
+  margin-top: 1.2vh;
+  font-size: 2.8vh;
+  font-weight: 700;
+  line-height: 1.45;
+  color: #cfe0f5;
+}
+
+.ap-tour__kicker b,
+.ap-tour__cap b {
+  font-family: var(--ap-font-num);
+  font-weight: 900;
+  color: var(--ap-hi);
+}
+
+.ap-tour__nums {
+  display: inline-block;
+  margin-top: 0.6vh;
+  font-size: 3.2vh;
+}
+
+.ap-tour__nums b {
+  display: inline-block;
+  min-width: 2.2em;
+  text-align: right;
+}
+
+.ap-tour__dots {
+  position: absolute;
+  left: 2.2vw;
+  right: 2.2vw;
+  bottom: 1.8vh;
+  display: flex;
+  gap: 0.8vw;
+}
+
+.ap-tour__dot {
+  flex: 1;
+  height: 0.6vh;
+  overflow: hidden;
+  border-radius: 1vh;
+  background: rgba(148, 163, 184, 0.25);
+}
+
+.ap-tour__dot i {
+  display: block;
+  width: 0;
+  height: 100%;
+  background: var(--ap-wind);
+}
+
+.ap-tour__dot.is-done i {
+  width: 100%;
+}
+
+.ap-tour__dot.is-active i {
+  animation: ap-tour-fill var(--ap-slide-s) linear both;
+}
+
+.ap-tour__svg {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.ap-tour__svg .fig {
+  fill: none;
+  stroke: var(--ap-ink);
+  stroke-width: 5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.ap-tour__svg .fig-fill {
+  fill: var(--ap-ink);
+}
+
+/* 第 2 張：雙手舉高 → 進度圈填滿 */
+.ap-tour__raise .tape {
+  fill: var(--ap-hi);
+}
+
+.ap-tour__raise .ring-track,
+.ap-tour__raise .ring-bar {
+  fill: none;
+  stroke-width: 4;
+}
+
+.ap-tour__raise .ring-track {
+  stroke: rgba(148, 163, 184, 0.22);
+}
+
+.ap-tour__raise .ring-bar {
+  stroke: var(--ap-wind);
+  stroke-linecap: round;
+  stroke-dasharray: 100;
+  transform: rotate(-90deg);
+  transform-origin: 50px 48px;
+  animation: ap-tour-ring var(--ap-slide-s) linear both;
+}
+
+.ap-tour__raise .arm-l,
+.ap-tour__raise .arm-r {
+  transform-origin: 50px 33px;
+  animation: var(--ap-slide-s) var(--ap-ease) both;
+}
+
+.ap-tour__raise .arm-l {
+  animation-name: ap-tour-arm-l;
+}
+
+.ap-tour__raise .arm-r {
+  animation-name: ap-tour-arm-r;
+}
+
+/* 第 3 張：側面，上半身趴下去、計時條跑 10 秒、風從前方吹來 */
+.ap-tour__lean .upper {
+  transform-origin: 40px 60px;
+  animation: ap-tour-lean var(--ap-slide-s) var(--ap-ease) both;
+}
+
+.ap-tour__lean .wind {
+  fill: none;
+  stroke: var(--ap-wind-2);
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  animation: ap-tour-wind 0.9s linear infinite;
+}
+
+.ap-tour__lean .w2 {
+  animation-delay: -0.3s;
+}
+
+.ap-tour__lean .w3 {
+  animation-delay: -0.6s;
+}
+
+.ap-tour__lean .bar-track {
+  fill: rgba(148, 163, 184, 0.25);
+}
+
+.ap-tour__lean .bar {
+  fill: var(--ap-hi);
+  transform-origin: 14px 92px;
+  animation: ap-tour-bar var(--ap-slide-s) linear both;
+}
+
+/* 第 4 張：頒獎台升起、星星彈出 */
+.ap-tour__podium rect {
+  transform-box: fill-box;
+  transform-origin: 50% 100%;
+  animation: ap-tour-rise 0.8s var(--ap-ease) both;
+}
+
+.ap-tour__podium .p1 {
+  fill: var(--ap-hi);
+  animation-delay: 0.5s;
+}
+
+.ap-tour__podium .p2,
+.ap-tour__podium .p3 {
+  fill: rgba(125, 211, 252, 0.5);
+}
+
+.ap-tour__podium .p3 {
+  animation-delay: 0.25s;
+}
+
+.ap-tour__podium .star {
+  fill: var(--ap-hi);
+  transform-box: fill-box;
+  transform-origin: 50% 50%;
+  animation: ap-pop 0.6s var(--ap-ease) 1.2s both;
 }
 
 .ap-attract__board {
@@ -1211,5 +1411,96 @@ body {
   }
   to {
     transform: translateX(110vw);
+  }
+}
+
+@keyframes ap-tour-in {
+  from {
+    opacity: 0;
+    transform: translateY(1.2vh);
+  }
+}
+
+@keyframes ap-tour-fill {
+  from {
+    width: 0;
+  }
+  to {
+    width: 100%;
+  }
+}
+
+@keyframes ap-tour-arm-l {
+  0%,
+  10% {
+    transform: rotate(20deg);
+  }
+  28%,
+  100% {
+    transform: rotate(160deg);
+  }
+}
+
+@keyframes ap-tour-arm-r {
+  0%,
+  10% {
+    transform: rotate(-20deg);
+  }
+  28%,
+  100% {
+    transform: rotate(-160deg);
+  }
+}
+
+@keyframes ap-tour-ring {
+  0%,
+  30% {
+    stroke-dashoffset: 100;
+  }
+  56%,
+  100% {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes ap-tour-lean {
+  0%,
+  14% {
+    transform: rotate(0deg);
+  }
+  36%,
+  100% {
+    transform: rotate(68deg);
+  }
+}
+
+@keyframes ap-tour-bar {
+  0%,
+  36% {
+    transform: scaleX(0);
+  }
+  96%,
+  100% {
+    transform: scaleX(1);
+  }
+}
+
+@keyframes ap-tour-wind {
+  from {
+    opacity: 0;
+    transform: translateX(0);
+  }
+  30% {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+    transform: translateX(-30px);
+  }
+}
+
+@keyframes ap-tour-rise {
+  from {
+    transform: scaleY(0);
   }
 }

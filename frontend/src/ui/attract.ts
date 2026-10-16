@@ -1,5 +1,7 @@
+import type { AreaResult } from '../area';
 import type { LeaderboardEntry, Settings } from '../types';
 import { LeaderboardPanel } from './leaderboard';
+import { Tour } from './tour';
 
 const RING_R = 44;
 const RING_C = 2 * Math.PI * RING_R;
@@ -16,14 +18,16 @@ function clamp01(p: number): number {
 
 /**
  * 待機畫面：疊在全螢幕相機畫面上（背景透明），吸引路人、教玩法、秀今日排行榜。
- * 有玩家站上來時，舉手圖示外面出現進度圈。
+ * 沒人時輪播玩法與目的；有玩家站上來就收起輪播，只留舉手提示和進度圈。
  */
 export class AttractScreen {
   private readonly el: HTMLElement;
   private readonly ring: SVGCircleElement;
   private readonly board: LeaderboardPanel;
+  private readonly tour: Tour;
+  private present = false;
 
-  constructor(root: HTMLElement) {
+  constructor(root: HTMLElement, getSettings: () => Settings) {
     this.el = document.createElement('section');
     this.el.className = 'ap-screen ap-attract';
     this.el.innerHTML = `
@@ -45,21 +49,18 @@ export class AttractScreen {
             <p class="ap-start__sub ap-start__sub--present">看到你了！手舉高，停住不動</p>
           </div>
         </div>
-        <ol class="ap-steps">
-          <li><b>1</b><span>站到膠帶上，雙手舉高</span></li>
-          <li><b>2</b><span>倒數後，身體趴低、縮小</span></li>
-          <li><b>3</b><span>風打到你的地方會變紅，紅色越少越省力</span></li>
-        </ol>
       </div>
       <div class="ap-attract__board"></div>
       <p class="ap-disclaimer">姿勢比較用，不是風洞量測</p>`;
     this.ring = this.el.querySelector('.ap-ring__bar') as SVGCircleElement;
     this.board = new LeaderboardPanel(this.el.querySelector('.ap-attract__board') as HTMLElement);
+    this.tour = new Tour(this.el.querySelector('.ap-attract__hero') as HTMLElement, getSettings);
     root.appendChild(this.el);
   }
 
   show(): void {
     this.el.classList.add('is-visible');
+    this.tour.restart();
   }
 
   hide(): void {
@@ -68,8 +69,22 @@ export class AttractScreen {
 
   /** 有人站在可玩區：顯示進度圈和「看到你了」；沒人時進度歸零、回到呼吸動畫。 */
   setPlayerPresent(b: boolean): void {
+    this.present = b;
     this.el.classList.toggle('is-present', b);
-    if (!b) this.setStartProgress(0);
+    if (!b) {
+      this.setStartProgress(0);
+      this.tour.restart(); // 人走了：下一位路人從第 1 張（目的）看起
+    }
+  }
+
+  /** 輪播第 1 張的騎士輪廓（坐直 → 趴低的逐格 mask）。 */
+  setDemo(frames: AreaResult[]): void {
+    this.tour.setDemo(frames);
+  }
+
+  /** ATTRACT 每幀呼叫；有玩家時輪播收起，不推進。 */
+  tick(now: number): void {
+    if (!this.present) this.tour.tick(now);
   }
 
   /** 舉手進度 0–1（滿了就要進倒數）。 */

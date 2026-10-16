@@ -6,7 +6,7 @@ import { CameraView } from './camera';
 import { Game } from './game';
 import { createApi } from './net/api';
 import { connectWS, defaultWsUrl } from './net/ws';
-import { UPRIGHT_POSE } from './poses';
+import { AERO_DEMO_POSE, UPRIGHT_POSE } from './poses';
 import { createMeasurer, createReplayView, poseForSample, replayPose } from './scene';
 import { Recorder } from './recorder';
 import { DEFAULT_SETTINGS, type GameState, type PlayerSkeleton, type SessionSummary, type Settings } from './types';
@@ -16,6 +16,7 @@ import { Hud } from './ui/hud';
 import { MaintenanceScreen } from './ui/maintenance';
 import { ResultScreen, type ResultView } from './ui/result';
 import { SettingsPanel } from './ui/settings';
+import { demoFrames } from './ui/tour';
 import { keepScreenAwake } from './wakelock';
 import { WindField } from './windfield';
 
@@ -54,7 +55,8 @@ keepScreenAwake(); // 無人攤位：螢幕不能睡
 const app = document.getElementById('app') as HTMLElement;
 const cam = new CameraView(app);
 const wind = new WindField(app, cam);
-const attract = new AttractScreen(app);
+const attract = new AttractScreen(app, () => settings);
+attract.setDemo(demoFrames((p) => measurer.measure(p), UPRIGHT_POSE, AERO_DEMO_POSE));
 const hud = new Hud(app);
 const result = new ResultScreen(app);
 const maintenance = new MaintenanceScreen(app);
@@ -207,6 +209,7 @@ function stepAttract(now: number, fresh: PlayerSkeleton | null): void {
     attract.setPlayerPresent(playerShown);
   }
   if (playerShown) attract.setStartProgress(game.startProgress);
+  attract.tick(now);
   if (now >= nextBoard) refreshBoard();
 }
 

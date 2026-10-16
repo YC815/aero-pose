@@ -1,13 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { Game } from '../src/game';
 import { DEFAULT_SETTINGS, type GameState, type PlayerSkeleton, type Settings } from '../src/types';
-import { standingSkeleton, translated } from './fixtures';
+import { standingSkeleton } from './fixtures';
 
 const DT = 0.1;
 const standing = standingSkeleton();
 const armsUp = standingSkeleton({ armsForwardDeg: 180 });
-/** 一直在動的玩家：每 0.1 秒往 +x 移 0.05 m（0.5 m/s）。 */
-const moving = (i: number) => translated(standing, [0.05 * i, 0, 0]);
 
 type PlayerFeed = PlayerSkeleton | null | ((i: number) => PlayerSkeleton | null);
 
@@ -27,7 +25,6 @@ class Harness {
     this.step++;
     return this.game.update({ now: this.now, player, cameraOk });
   }
-  /** 持續送 s 秒。 */
   run(s: number, feed: PlayerFeed, cameraOk = true): GameState {
     const n = Math.round(s / DT);
     for (let i = 0; i < n; i++) this.tick(typeof feed === 'function' ? feed(i) : feed, cameraOk);
@@ -41,120 +38,104 @@ class Harness {
     }
     throw new Error(`${maxS} 秒內沒有進入 ${target}，目前 ${this.game.state}`);
   }
-  /** 從 ATTRACT 一路走到 POSING。 */
-  toPosing() {
-    this.tick(standing);
-    expect(this.game.state).toBe('READY');
-    this.runUntil('POSING', armsUp, 2);
+  toCountdown() {
+    this.runUntil('COUNTDOWN', armsUp, 2);
+  }
+  toRecording() {
+    this.toCountdown();
+    this.runUntil('RECORDING', standing, 4);
   }
 }
 
 describe('Game', () => {
-  it('初始為 ATTRACT，沒人時保持', () => {
+  it('初始為 ATTRACT，沒人時保持，startProgress 為 0', () => {
     const h = new Harness();
     expect(h.game.state).toBe('ATTRACT');
     h.run(2, null);
     expect(h.game.state).toBe('ATTRACT');
+    expect(h.game.startProgress).toBe(0);
     expect(h.transitions).toEqual([]);
   });
 
-  it('完整走一輪 ATTRACT → READY → POSING → COUNTDOWN → RESULT → ATTRACT', () => {
+  it('站著不舉手不會開始', () => {
     const h = new Harness();
-    h.tick(standing);
-    expect(h.game.state).toBe('READY');
+    h.run(5, standing);
+    expect(h.game.state).toBe('ATTRACT');
     expect(h.game.startProgress).toBe(0);
+  });
 
+  it('完整走一輪 ATTRACT → COUNTDOWN → RECORDING → RESULT → ATTRACT', () => {
+    const h = new Harness();
     h.run(0.5, armsUp);
     expect(h.game.startProgress).toBeGreaterThan(0.3);
-    expect(h.game.startProgress).toBeLessThan(0.6);
-    const tStart = 0.5 + h.runUntil('POSING', armsUp, 2);
+    expect(h.game.startProgress).toBeLessThan(0.7);
+    const tStart = 0.5 + h.runUntil('COUNTDOWN', armsUp, 2);
     expect(tStart).toBeGreaterThan(0.95);
     expect(tStart).toBeLessThan(1.25);
-    expect(h.game.stillProgress).toBe(0);
-    expect(h.game.posingLeft).toBeCloseTo(20, 6);
-
-    h.run(1.0, standing);
-    expect(h.game.state).toBe('POSING');
-    expect(h.game.stillProgress).toBeGreaterThan(0.3);
-    expect(h.game.stillProgress).toBeLessThan(1);
-    // 靜止 1.5 秒 + 偵測器暖機（至少 0.2 秒的樣本）
-    const tStill = 1.0 + h.runUntil('COUNTDOWN', standing, 3);
-    expect(tStill).toBeGreaterThan(1.55);
-    expect(tStill).toBeLessThan(2.3);
     expect(h.game.countdownLeft).toBeCloseTo(3, 6);
 
     h.run(1.5, standing);
     expect(h.game.countdownLeft).toBeCloseTo(1.5, 6);
-    const tCount = 1.5 + h.runUntil('RESULT', standing, 3);
-    expect(tCount).toBeCloseTo(3, 6);
+    expect(1.5 + h.runUntil('RECORDING', standing, 3)).toBeCloseTo(3, 6);
+    expect(h.game.recordElapsed).toBeCloseTo(0, 6);
+    expect(h.game.recordLeft).toBeCloseTo(10, 6);
+
+    h.run(4, standing);
+    expect(h.game.state).toBe('RECORDING');
+    expect(h.game.recordElapsed).toBeCloseTo(4, 6);
+    expect(h.game.recordLeft).toBeCloseTo(6, 6);
+    expect(4 + h.runUntil('RESULT', standing, 10)).toBeCloseTo(10, 6);
     expect(h.game.resultLeft).toBeCloseTo(12, 6);
 
-    const tResult = h.runUntil('ATTRACT', null, 15);
-    expect(tResult).toBeCloseTo(12, 6);
-
+    expect(h.runUntil('ATTRACT', standing, 15)).toBeCloseTo(12, 6);
     expect(h.transitions).toEqual([
-      ['ATTRACT', 'READY'],
-      ['READY', 'POSING'],
-      ['POSING', 'COUNTDOWN'],
-      ['COUNTDOWN', 'RESULT'],
+      ['ATTRACT', 'COUNTDOWN'],
+      ['COUNTDOWN', 'RECORDING'],
+      ['RECORDING', 'RESULT'],
       ['RESULT', 'ATTRACT'],
     ]);
   });
 
-  it('RESULT 結束時還有玩家 → READY', () => {
+  it('RESULT 結束一律回 ATTRACT，即使玩家還在', () => {
     const h = new Harness();
-    h.toPosing();
-    h.game.forceCountdown(h.now);
-    h.runUntil('RESULT', standing, 4);
-    expect(h.runUntil('READY', standing, 13)).toBeCloseTo(12, 6);
+    h.toRecording();
+    h.runUntil('RESULT', standing, 11);
+    h.runUntil('ATTRACT', armsUp, 13);
     expect(h.game.startProgress).toBe(0);
   });
 
   it('舉手中斷要歸零', () => {
     const h = new Harness();
-    h.tick(standing);
     h.run(0.8, armsUp);
     expect(h.game.startProgress).toBeGreaterThan(0.6);
     h.tick(standing);
-    expect(h.game.state).toBe('READY');
+    expect(h.game.state).toBe('ATTRACT');
     expect(h.game.startProgress).toBe(0);
     h.run(0.8, armsUp);
-    expect(h.game.state).toBe('READY');
+    expect(h.game.state).toBe('ATTRACT');
     h.run(0.4, armsUp);
-    expect(h.game.state).toBe('POSING');
+    expect(h.game.state).toBe('COUNTDOWN');
   });
 
-  it('POSING 一直動 → 滿 20 秒強制倒數', () => {
+  it('舉手到一半玩家消失 → startProgress 歸零', () => {
     const h = new Harness();
-    h.toPosing();
-    h.run(10, moving);
-    expect(h.game.state).toBe('POSING');
-    expect(h.game.stillProgress).toBe(0);
-    expect(h.game.posingLeft).toBeCloseTo(10, 6);
-    const t = 10 + h.runUntil('COUNTDOWN', (i) => moving(100 + i), 11);
-    expect(t).toBeCloseTo(20, 6);
+    h.run(0.5, armsUp);
+    h.tick(null);
+    expect(h.game.startProgress).toBe(0);
   });
 
-  it('靜止被打斷要重新計時', () => {
-    const h = new Harness();
-    h.toPosing();
-    h.run(1.4, standing);
-    expect(h.game.state).toBe('POSING');
-    expect(h.game.stillProgress).toBeGreaterThan(0.5);
-    h.run(0.6, moving);
-    expect(h.game.stillProgress).toBe(0);
-    h.run(1.2, standing);
-    expect(h.game.state).toBe('POSING');
+  it('RECORDING 中 settings.record_s 決定長度', () => {
+    const h = new Harness({ ...DEFAULT_SETTINGS, record_s: 4 });
+    h.toRecording();
+    expect(h.runUntil('RESULT', standing, 6)).toBeCloseTo(4, 6);
   });
 
-  it('短暫 null 不會回 ATTRACT，連續滿 3 秒才會（READY / POSING / COUNTDOWN）', () => {
-    // 倒數拉長，避免倒數先結束
-    const settings = { ...DEFAULT_SETTINGS, countdown_s: 10 };
-    for (const enter of ['READY', 'POSING', 'COUNTDOWN'] as const) {
+  it('短暫 null 不會回 ATTRACT，連續滿 3 秒才會（COUNTDOWN / RECORDING）', () => {
+    const settings = { ...DEFAULT_SETTINGS, countdown_s: 10, record_s: 30 };
+    for (const enter of ['COUNTDOWN', 'RECORDING'] as const) {
       const h = new Harness(settings);
-      h.tick(standing);
-      if (enter !== 'READY') h.runUntil('POSING', armsUp, 2);
-      if (enter === 'COUNTDOWN') h.game.forceCountdown(h.now);
+      h.toCountdown();
+      if (enter === 'RECORDING') h.runUntil('RECORDING', standing, 11);
       expect(h.game.state).toBe(enter);
 
       h.run(2.0, null);
@@ -164,12 +145,21 @@ describe('Game', () => {
       expect(h.game.state).toBe(enter);
       h.run(0.4, null);
       expect(h.game.state).toBe('ATTRACT');
+      expect(h.transitions.at(-1)).toEqual([enter, 'ATTRACT']);
     }
+  });
+
+  it('RESULT 中玩家消失不影響', () => {
+    const h = new Harness();
+    h.toRecording();
+    h.runUntil('RESULT', standing, 11);
+    h.run(5, null);
+    expect(h.game.state).toBe('RESULT');
   });
 
   it('cameraOk=false → MAINTENANCE；恢復 → ATTRACT', () => {
     const h = new Harness();
-    h.toPosing();
+    h.toRecording();
     h.tick(standing, false);
     expect(h.game.state).toBe('MAINTENANCE');
     h.run(1, standing, false);
@@ -177,35 +167,53 @@ describe('Game', () => {
     h.tick(standing, true);
     expect(h.game.state).toBe('ATTRACT');
     expect(h.transitions.slice(-2)).toEqual([
-      ['POSING', 'MAINTENANCE'],
+      ['RECORDING', 'MAINTENANCE'],
       ['MAINTENANCE', 'ATTRACT'],
     ]);
   });
 
-  it('ATTRACT 時鏡頭斷線也進 MAINTENANCE', () => {
-    const h = new Harness();
-    h.tick(null, false);
-    expect(h.game.state).toBe('MAINTENANCE');
+  it('任何狀態斷線都進 MAINTENANCE（ATTRACT / COUNTDOWN / RESULT）', () => {
+    const a = new Harness();
+    a.tick(null, false);
+    expect(a.game.state).toBe('MAINTENANCE');
+
+    const c = new Harness();
+    c.toCountdown();
+    c.tick(standing, false);
+    expect(c.game.state).toBe('MAINTENANCE');
+
+    const r = new Harness();
+    r.toRecording();
+    r.runUntil('RESULT', standing, 11);
+    r.tick(standing, false);
+    expect(r.game.state).toBe('MAINTENANCE');
   });
 
-  it('forceCountdown 只在 READY / POSING 生效', () => {
+  it('dt 很大（分頁休眠）也能轉移，且一次 update 最多轉一個狀態', () => {
     const h = new Harness();
-    h.game.forceCountdown(h.now);
-    expect(h.game.state).toBe('ATTRACT');
-    h.tick(standing);
-    h.game.forceCountdown(h.now);
+    h.game.update({ now: 0, player: armsUp, cameraOk: true });
+    expect(h.game.update({ now: 100, player: armsUp, cameraOk: true })).toBe('COUNTDOWN');
+    expect(h.game.update({ now: 200, player: standing, cameraOk: true })).toBe('RECORDING');
+    expect(h.game.update({ now: 300, player: standing, cameraOk: true })).toBe('RESULT');
+    expect(h.game.update({ now: 400, player: standing, cameraOk: true })).toBe('ATTRACT');
+    expect(h.transitions.length).toBe(4);
+  });
+
+  it('forceStart 只在 ATTRACT 生效', () => {
+    const h = new Harness();
+    h.game.forceStart(h.now);
     expect(h.game.state).toBe('COUNTDOWN');
-    expect(h.transitions.at(-1)).toEqual(['READY', 'COUNTDOWN']);
-    h.game.forceCountdown(h.now);
-    expect(h.transitions.length).toBe(2);
+    expect(h.transitions.at(-1)).toEqual(['ATTRACT', 'COUNTDOWN']);
+    h.game.forceStart(h.now);
+    expect(h.transitions.length).toBe(1);
   });
 
   it('每次 update 讀最新設定', () => {
     const settings = { ...DEFAULT_SETTINGS };
     const h = new Harness(settings);
-    h.tick(standing);
+    h.tick(armsUp);
     settings.start_hold_s = 0.3;
-    h.run(0.6, armsUp);
-    expect(h.game.state).toBe('POSING');
+    h.run(0.4, armsUp);
+    expect(h.game.state).toBe('COUNTDOWN');
   });
 });

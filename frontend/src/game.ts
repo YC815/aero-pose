@@ -1,6 +1,6 @@
-// 無人看管的遊戲狀態機（spec §5.5）。純邏輯，時間由呼叫端傳入（秒）。
+// 無人看管的遊戲狀態機（v1.1 spec 流程章節）。純邏輯，時間由呼叫端傳入（秒）。
 
-import { StillnessDetector, handsUp } from './motion';
+import { handsUp } from './motion';
 import type { GameState, PlayerSkeleton, Settings } from './types';
 
 export interface GameInput {
@@ -10,7 +10,7 @@ export interface GameInput {
 }
 
 const EPS = 1e-6; // 吸收浮點時間誤差，讓「滿 N 秒」準時觸發
-const TRACKED: readonly GameState[] = ['READY', 'POSING', 'COUNTDOWN'];
+const TRACKED: readonly GameState[] = ['COUNTDOWN', 'RECORDING'];
 
 const elapsed = (now: number, since: number | null): number => (since === null ? 0 : now - since);
 const progress = (t: number, hold: number): number => (hold <= 0 ? 1 : Math.min(1, t / hold));
@@ -18,17 +18,15 @@ const progress = (t: number, hold: number): number => (hold <= 0 ? 1 : Math.min(
 export class Game {
   state: GameState = 'ATTRACT';
   startProgress = 0;
-  stillProgress = 0;
   countdownLeft = 0;
+  recordElapsed = 0;
+  recordLeft = 0;
   resultLeft = 0;
-  posingLeft = 0;
   onTransition: ((from: GameState, to: GameState) => void) | null = null;
 
   private readonly getSettings: () => Settings;
-  private readonly stillness = new StillnessDetector();
   private enteredAt = 0;
   private handsUpSince: number | null = null;
-  private stillSince: number | null = null;
   private lostSince: number | null = null;
 
   constructor(getSettings: () => Settings) {
@@ -44,7 +42,7 @@ export class Game {
       return this.state;
     }
 
-    // 失去玩家：跨狀態連續計時，有玩家就歸零
+    // 失去玩家：連續計時，有玩家就歸零
     if (player) this.lostSince = null;
     else this.lostSince ??= now;
     if (TRACKED.includes(this.state) && elapsed(now, this.lostSince) >= s.lost_timeout_s - EPS) {
@@ -58,48 +56,37 @@ export class Game {
         this.enter('ATTRACT', now);
         break;
 
-      case 'ATTRACT':
-        if (player) this.enter('READY', now);
-        break;
-
-      case 'READY': {
+      case 'ATTRACT': {
         if (player && handsUp(player)) this.handsUpSince ??= now;
         else this.handsUpSince = null;
         const held = elapsed(now, this.handsUpSince);
         this.startProgress = this.handsUpSince === null ? 0 : progress(held, s.start_hold_s);
-        if (this.handsUpSince !== null && held >= s.start_hold_s - EPS) this.enter('POSING', now);
-        break;
-      }
-
-      case 'POSING': {
-        if (player) this.stillness.push(player, now);
-        // 沒有玩家就無法判斷靜止，視同在動
-        if (player && this.stillness.meanSpeed() < s.stillness_speed_mps) this.stillSince ??= now;
-        else this.stillSince = null;
-        const still = elapsed(now, this.stillSince);
-        this.stillProgress = this.stillSince === null ? 0 : progress(still, s.stillness_hold_s);
-        this.posingLeft = Math.max(0, s.posing_max_s - inState);
-        const stillDone = this.stillSince !== null && still >= s.stillness_hold_s - EPS;
-        if (stillDone || inState >= s.posing_max_s - EPS) this.enter('COUNTDOWN', now);
+        if (this.handsUpSince !== null && held >= s.start_hold_s - EPS) this.enter('COUNTDOWN', now);
         break;
       }
 
       case 'COUNTDOWN':
         this.countdownLeft = Math.max(0, s.countdown_s - inState);
-        if (inState >= s.countdown_s - EPS) this.enter('RESULT', now);
+        if (inState >= s.countdown_s - EPS) this.enter('RECORDING', now);
+        break;
+
+      case 'RECORDING':
+        this.recordElapsed = Math.min(s.record_s, inState);
+        this.recordLeft = Math.max(0, s.record_s - inState);
+        if (inState >= s.record_s - EPS) this.enter('RESULT', now);
         break;
 
       case 'RESULT':
         this.resultLeft = Math.max(0, s.result_s - inState);
-        if (inState >= s.result_s - EPS) this.enter(player ? 'READY' : 'ATTRACT', now);
+        if (inState >= s.result_s - EPS) this.enter('ATTRACT', now);
         break;
     }
     return this.state;
   }
 
-  /** 開發用（空白鍵）：READY 或 POSING 時直接進倒數。 */
-  forceCountdown(now: number): void {
-    if (this.state === 'READY' || this.state === 'POSING') this.enter('COUNTDOWN', now);
+  /** 開發用（空白鍵）：ATTRACT 時直接進倒數。 */
+  forceStart(now: number): void {
+    if (this.state === 'ATTRACT') this.enter('COUNTDOWN', now);
   }
 
   private enter(to: GameState, now: number): void {
@@ -110,11 +97,9 @@ export class Game {
 
     this.handsUpSince = null;
     this.startProgress = 0;
-    this.stillSince = null;
-    this.stillProgress = 0;
-    this.stillness.reset();
-    this.posingLeft = s.posing_max_s;
     this.countdownLeft = s.countdown_s;
+    this.recordElapsed = 0;
+    this.recordLeft = s.record_s;
     this.resultLeft = s.result_s;
 
     this.onTransition?.(from, to);

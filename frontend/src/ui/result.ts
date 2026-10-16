@@ -5,7 +5,7 @@ import { ChartCanvas } from './chart';
 
 export interface ResultView {
   summary: SessionSummary;
-  /** 最趴低那一刻的標準騎士正面 mask（白色不透明 = 覆蓋），給結果卡用。 */
+  /** 最趴低那一刻的標準騎士正面 mask（白色不透明 = 覆蓋；第 0 欄 = 騎士本人左側，原樣就是鏡像方向），給結果卡用。 */
   bestMask: ImageData;
   /** 瓦數換算用的時速（settings.speed_kmh）。 */
   speedKmh: number;

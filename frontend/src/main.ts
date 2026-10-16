@@ -1,4 +1,4 @@
-// 入口：WS frame → 全螢幕鏡像相機；skeleton → retarget → tracker → 後台標準騎士計分；
+// 入口：WS frame → 全螢幕鏡像相機；skeleton → Recorder（retarget → tracker → 後台標準騎士計分）；
 // Game 狀態機驅動 UI；RESULT 才把 3D 騎士放進結果頁重播這 10 秒，並 POST 成績。
 import './style.css';
 import { maskToImageData } from './area';
@@ -8,8 +8,7 @@ import { createApi } from './net/api';
 import { connectWS, defaultWsUrl } from './net/ws';
 import { UPRIGHT_POSE } from './poses';
 import { createMeasurer, createReplayView, poseForSample, replayPose } from './scene';
-import { RecordingSession } from './session';
-import { PoseTracker } from './tracker';
+import { Recorder } from './recorder';
 import { DEFAULT_SETTINGS, type GameState, type PlayerSkeleton, type SessionSummary, type Settings } from './types';
 import { AttractScreen } from './ui/attract';
 import { renderResultCard } from './ui/card';
@@ -38,13 +37,16 @@ let playerShown = false;
 let nextBoard = 0;
 let nextHud = 0;
 let maintReason = '';
-let session: RecordingSession | null = null;
 let replay: { summary: SessionSummary; startAt: number; crank: number } | null = null;
 
 // 後台計分：標準騎士＋固定曲柄。坐直基準只算一次。
 const measurer = createMeasurer();
 const baseline = measurer.measure(UPRIGHT_POSE);
-const tracker = new PoseTracker(1); // 只用跟隨目標（軀幹被擋時保留上一個有效姿勢）
+const recorder = new Recorder({
+  baselineM2: baseline.areaM2,
+  measure: (p) => measurer.measure(p).areaM2,
+  settings: () => settings,
+});
 
 keepScreenAwake(); // 無人攤位：螢幕不能睡
 
@@ -93,7 +95,7 @@ const ws = connectWS(defaultWsUrl(), {
         case 'skeleton':
           player = m.player;
           playerAt = clock();
-          tracker.push(m.player, playerAt, settings.torso_gain);
+          recorder.onSkeleton(m.player, playerAt);
           break;
         case 'status':
           cameraStatus = m.camera;
@@ -139,23 +141,13 @@ function enterUi(from: GameState, to: GameState): void {
     attract.setPlayerPresent(false);
     refreshBoard();
   }
-  // 離開 RECORDING 就丟掉 session：中止（玩家消失、斷線）不記成績，錄滿的交給結果頁
-  const done = session;
-  session = null;
-  if (to === 'RECORDING') {
-    session = new RecordingSession({
-      baselineM2: baseline.areaM2,
-      measure: (p) => measurer.measure(p).areaM2,
-      settings: () => settings,
-    });
-    nextHud = 0;
-  }
-  if (to === 'RESULT' && from === 'RECORDING' && done) {
-    try {
-      showResult(done);
-    } catch (e) {
-      console.error('產生結果失敗', e); // 結果頁空白到 result_s 結束，之後回待機
-    }
+  if (to === 'RECORDING') nextHud = 0;
+  // 中止（玩家消失、斷線）不記成績；錄滿進 RESULT 才有 summary
+  try {
+    const summary = recorder.onTransition(from, to, game.recordElapsed, clock());
+    if (summary) showResult(summary);
+  } catch (e) {
+    console.error('產生結果失敗', e); // 結果頁空白到 result_s 結束，之後回待機
   }
 }
 
@@ -171,20 +163,16 @@ function showMaintenance(): void {
 function refreshBoard(): void {
   nextBoard = clock() + LEADERBOARD_INTERVAL_S;
   api.getLeaderboard().then(
-    (e) => attract.setLeaderboard(e),
+    (e) => attract.setLeaderboard(e, settings),
     () => {}, // 讀不到就保留舊的
   );
 }
 
-function showResult(rec: RecordingSession): void {
+function showResult(summary: SessionSummary): void {
   const now = clock();
-  // Game 錄滿進 RESULT 時保留 recordElapsed = record_s：補上 t = record_s 的最後一筆（共 101 筆）
-  rec.push(tracker.target(now), game.recordElapsed);
-  const summary = rec.summary(settings.record_s);
-
   const best = summary.samples[summary.bestIndex];
   const bestPose = poseForSample(summary.poses, best.t) ?? UPRIGHT_POSE;
-  // frontalArea 的 mask 原樣給 card.ts（第 0 列在上、白色不透明）
+  // frontalArea 的 mask 原樣給 card.ts（第 0 列在上、白色不透明；左右已是鏡像方向）
   const bestMask = maskToImageData(measurer.measure(bestPose), [255, 255, 255, 255]);
 
   const v: ResultView = { summary, bestMask, speedKmh: settings.speed_kmh };
@@ -223,9 +211,8 @@ function stepAttract(now: number, fresh: PlayerSkeleton | null): void {
 }
 
 function stepRecording(now: number): void {
+  const session = recorder.step(now, game.recordElapsed);
   if (!session) return;
-  // 每幀都 push（玩家消失時 tracker 會給坐直）；session 每 0.1 s 才 measure 一次
-  session.push(tracker.target(now), game.recordElapsed);
   if (now < nextHud) return;
   nextHud = now + HUD_INTERVAL_S;
   hud.setWatts(session.latestWatts());

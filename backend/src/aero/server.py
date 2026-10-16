@@ -188,6 +188,13 @@ class CameraState:
         return {"type": "status", "camera": self.camera(now), "fps": round(fps, 1)}
 
 
+def next_frame_deadline(deadline: float, now: float, interval: float) -> float:
+    """frame 送出後的下一個截止時間：照固定節拍往後排，不跟著 step 的時間點漂移，平均才會接近 1 / interval。
+    落後超過一個 interval（第一張、卡頓後）就從 now 重新對齊，不會連發補幀。"""
+    nxt = deadline + interval
+    return nxt if nxt >= now - interval else now + interval
+
+
 def _exit_for_restart() -> None:
     """卡死的 SDK 呼叫救不回來，只能整個行程重來。os._exit 不等 daemon thread、不跑 atexit。"""
     logging.shutdown()
@@ -244,7 +251,7 @@ class PipelineRunner:
 
     def _loop_steps(self, pipeline: Any) -> None:
         last_preview = 0.0
-        last_frame = float("-inf")
+        next_frame = float("-inf")
         while not self._stop.is_set():
             r = pipeline.step()
             if r is None:
@@ -257,8 +264,8 @@ class PipelineRunner:
             if self._hub.preview_count > 0 and now - last_preview >= PREVIEW_INTERVAL_S:
                 last_preview = now
                 self._emit_preview(r)
-            if self._hub.client_count > 0 and now - last_frame >= FRAME_INTERVAL_S:
-                last_frame = now
+            if self._hub.client_count > 0 and now >= next_frame:
+                next_frame = next_frame_deadline(next_frame, now, FRAME_INTERVAL_S)
                 self._render_and_emit_frame(r)
 
     def _render_and_emit_frame(self, r: Any) -> None:

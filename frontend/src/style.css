@@ -410,15 +410,6 @@ body {
   font-weight: 600;
 }
 
-/* 面積降為小字，接在騎士編號後面 */
-.ap-board__area {
-  margin-left: 0.7em;
-  font-family: var(--ap-font-num);
-  font-size: 0.55em;
-  font-weight: 500;
-  color: var(--ap-dim);
-}
-
 .ap-board__watts {
   text-align: right;
   font-family: var(--ap-font-num);

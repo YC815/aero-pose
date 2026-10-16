@@ -1,8 +1,20 @@
-import type { LeaderboardEntry } from '../types';
+import { DEFAULT_SETTINGS, type LeaderboardEntry, type Settings } from '../types';
+import { wattsSaved } from '../watts';
+
+type WattsSettings = Pick<Settings, 'cd' | 'speed_kmh' | 'air_density'>;
+
+/**
+ * 排行榜顯示的瓦數：用目前設定從面積重算，不用上傳時的 watts_saved。
+ * 後端依面積升冪排名；同一個坐直基準下，重算的瓦數和名次一定單調一致（當天改過時速、Cd 也一樣）。
+ */
+export function boardWatts(e: Pick<LeaderboardEntry, 'area_m2' | 'baseline_m2'>, s: WattsSettings): string {
+  const w = Math.round(wattsSaved(e.baseline_m2, e.area_m2, s));
+  return w >= 0 ? String(w) : `−${-w}`;
+}
 
 const MAX_ROWS = 10;
 
-/** 今日排行榜：主要數字是平均省幾瓦（後端依面積排序，等同依瓦數由大到小），前 3 名用螢光黃。 */
+/** 今日排行榜：只顯示平均省幾瓦（後端依面積排序，等同依瓦數由大到小），前 3 名用螢光黃。 */
 export class LeaderboardPanel {
   private readonly el: HTMLElement;
   private readonly list: HTMLOListElement;
@@ -21,10 +33,10 @@ export class LeaderboardPanel {
       <ol class="ap-board__list"></ol>`;
     this.list = this.el.querySelector('ol') as HTMLOListElement;
     root.appendChild(this.el);
-    this.set([]);
+    this.set([], DEFAULT_SETTINGS);
   }
 
-  set(entries: LeaderboardEntry[], highlightId?: string): void {
+  set(entries: LeaderboardEntry[], s: WattsSettings, highlightId?: string): void {
     this.list.replaceChildren();
     if (entries.length === 0) {
       const li = document.createElement('li');
@@ -40,13 +52,10 @@ export class LeaderboardPanel {
       if (i === 0) li.classList.add('is-first');
       if (highlightId !== undefined && e.id === highlightId) li.classList.add('is-you');
       li.style.setProperty('--i', String(i));
-      const watts = Math.round(e.watts_saved);
-      const who = cell('ap-board__who', `騎士 #${e.number}`);
-      who.appendChild(cell('ap-board__area', `${e.area_m2.toFixed(3)} m²`));
       li.append(
         cell('ap-board__rank', String(i + 1)),
-        who,
-        cell('ap-board__watts', watts >= 0 ? String(watts) : `−${-watts}`, '瓦'),
+        cell('ap-board__who', `騎士 #${e.number}`),
+        cell('ap-board__watts', boardWatts(e, s), '瓦'),
       );
       this.list.appendChild(li);
     });

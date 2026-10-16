@@ -462,6 +462,33 @@ def test_frame在pipeline_thread渲染且限制fps(tmp_path, monkeypatch):
     assert seen == ["aero-pipeline"]
 
 
+def _frames_sent(step_times, interval=0.05):
+    sent, deadline = [], float("-inf")
+    for now in step_times:
+        if now >= deadline:
+            deadline = server.next_frame_deadline(deadline, now, interval)
+            sent.append(now)
+    return sent
+
+
+def test_frame節流_相機35ms一步時平均接近20fps():
+    steps = [i * 0.035 for i in range(int(10 / 0.035))]  # 約 28.6 Hz 跑 10 秒
+    sent = _frames_sent(steps)
+    assert 195 <= len(sent) <= 201  # 舊的「距上次 ≥ 50 ms」只有每兩步一張 ≈ 143
+    gaps = [b - a for a, b in zip(sent, sent[1:])]
+    assert min(gaps) >= 0.035 - 1e-9  # 一步最多一張
+
+
+def test_frame節流_卡頓後不連發():
+    steps = [i * 0.035 for i in range(10)] + [2.0 + i * 0.035 for i in range(30)]  # 中間卡 ~1.7 s
+    sent = _frames_sent(steps)
+    after = [t for t in sent if t >= 2.0]
+    assert after[0] == 2.0
+    # 恢復後的 0.5 s 有 15 步；沒有重新對齊會每步都送（補欠的節拍），對齊後維持 20 fps
+    assert len([t for t in after if t < 2.5]) <= 0.5 / 0.05 + 1
+    assert len(after) >= 30 * 0.035 / 0.05 - 1
+
+
 def test_沒有client不渲染frame(tmp_path, monkeypatch):
     seen = []
     monkeypatch.setattr(server, "_render_frame", lambda r: seen.append(1) or _frame_msg(0))

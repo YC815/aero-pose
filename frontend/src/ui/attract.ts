@@ -1,4 +1,4 @@
-import type { LeaderboardEntry } from '../types';
+import type { LeaderboardEntry, Settings } from '../types';
 import { LeaderboardPanel } from './leaderboard';
 
 const RING_R = 44;
@@ -79,7 +79,8 @@ export class AttractScreen {
     this.el.classList.toggle('is-start-full', t >= 1);
   }
 
-  setLeaderboard(e: LeaderboardEntry[]): void {
-    this.board.set(e);
+  /** s：目前的瓦數換算設定，排行榜用它從面積重算瓦數。 */
+  setLeaderboard(e: LeaderboardEntry[], s: Pick<Settings, 'cd' | 'speed_kmh' | 'air_density'>): void {
+    this.board.set(e, s);
   }
 }

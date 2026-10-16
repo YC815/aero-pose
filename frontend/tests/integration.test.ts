@@ -1,14 +1,13 @@
-// 端到端（不含 WebGL / DOM）：合成骨架 → tracker → Game → RecordingSession → summary。
-// 走的是 main.ts 實際用的同一條路：每幀 game.update，RECORDING 時每幀 push(tracker.target, recordElapsed)，
-// 錄滿進 RESULT 那一刻補 push(t = record_s)，再 summary。
+// 端到端（不含 WebGL / DOM）：合成骨架 → Recorder → Game → summary。
+// Recorder 就是 main.ts 用的那一份接線：skeleton → recorder.onSkeleton，Game 轉移 → recorder.onTransition，
+// RECORDING 每幀 recorder.step；這裡只模擬 main 的呼叫時序（rAF 60 fps、骨架 30 fps）。
 
 import { describe, expect, it } from 'vitest';
 import { Game } from '../src/game';
 import { UPRIGHT_POSE } from '../src/poses';
 import { retarget } from '../src/retarget';
 import { createMeasurer, poseForSample, replayPose, type TimedPose } from '../src/scene';
-import { RecordingSession } from '../src/session';
-import { PoseTracker } from '../src/tracker';
+import { Recorder } from '../src/recorder';
 import { DEFAULT_SETTINGS, type PlayerSkeleton, type SessionSummary, type Settings } from '../src/types';
 import { wattsSaved } from '../src/watts';
 import { standingSkeleton } from './fixtures';
@@ -26,26 +25,17 @@ function playRound(
   s: Settings = DEFAULT_SETTINGS,
 ): { summary: SessionSummary | null; states: string[] } {
   const game = new Game(() => s);
-  const tracker = new PoseTracker(1);
-  let session: RecordingSession | null = null;
+  const recorder = new Recorder({
+    baselineM2: baseline.areaM2,
+    measure: (p) => measurer.measure(p).areaM2,
+    settings: () => s,
+  });
   let summary: SessionSummary | null = null;
   let now = 0;
   const states: string[] = [];
   game.onTransition = (from, to) => {
     states.push(to);
-    const done = session;
-    session = null;
-    if (to === 'RECORDING') {
-      session = new RecordingSession({
-        baselineM2: baseline.areaM2,
-        measure: (p) => measurer.measure(p).areaM2,
-        settings: () => s,
-      });
-    }
-    if (to === 'RESULT' && from === 'RECORDING' && done) {
-      done.push(tracker.target(now), game.recordElapsed);
-      summary = done.summary(s.record_s);
-    }
+    summary = recorder.onTransition(from, to, game.recordElapsed, now) ?? summary;
   };
   game.forceStart(0);
 
@@ -53,9 +43,9 @@ function playRound(
   for (let i = 1; now < end && game.state !== 'ATTRACT' && game.state !== 'RESULT'; i++) {
     now = i / 60;
     const sk = feed(now - s.countdown_s);
-    if (i % 2 === 0) tracker.push(sk, now, s.torso_gain);
+    if (i % 2 === 0) recorder.onSkeleton(sk, now);
     const state = game.update({ now, player: sk, cameraOk: true });
-    if (state === 'RECORDING') (session as RecordingSession | null)?.push(tracker.target(now), game.recordElapsed);
+    if (state === 'RECORDING') recorder.step(now, game.recordElapsed);
   }
   return { summary, states };
 }
@@ -132,6 +122,40 @@ describe('整合：錄製中的遮擋與中止', () => {
     hidden.visibility.right_hip = 0.1;
     const { summary } = playRound((t) => (t >= 6 && t < 6.2 ? hidden : lean));
     const area = areaOf(lean);
+    expect(summary!.samples).toHaveLength(101);
+    for (const x of summary!.samples) expect(x.areaM2).toBeCloseTo(area, 9);
+  });
+
+  it('前傾段髖部被擋 2 s（遠超過 0.3 s）：101 個樣本都沿用前傾的面積，不會算成坐直 0 W', () => {
+    const lean = standingSkeleton({ leanDeg: 50 });
+    const hidden = standingSkeleton({ leanDeg: 50 });
+    hidden.visibility.left_hip = 0.2;
+    hidden.visibility.right_hip = 0.1;
+    const { summary, states } = playRound((t) => (t >= 4 && t < 6 ? hidden : lean));
+    const area = areaOf(lean);
+    expect(states).toEqual(['COUNTDOWN', 'RECORDING', 'RESULT']);
+    expect(summary!.samples).toHaveLength(101);
+    for (const x of summary!.samples) expect(x.areaM2).toBeCloseTo(area, 9);
+  });
+
+  it('錄製中單一 player: null 骨架：不產生坐直（0 W）的樣本', () => {
+    const lean = standingSkeleton({ leanDeg: 50 });
+    // 骨架 30 fps（偶數 rAF 幀）；t ∈ [3.0, 3.03) 只涵蓋一則骨架 → 恰好一則 null
+    const { summary, states } = playRound((t) => (t >= 3 && t < 3.03 ? null : lean));
+    const area = areaOf(lean);
+    expect(states).toEqual(['COUNTDOWN', 'RECORDING', 'RESULT']);
+    expect(summary!.samples).toHaveLength(101);
+    for (const x of summary!.samples) {
+      expect(x.areaM2).toBeCloseTo(area, 9);
+      expect(x.watts).toBeGreaterThan(10);
+    }
+  });
+
+  it('錄製中 player: null 連續 0.5 s：照樣沿用前傾的面積，Game 不中止', () => {
+    const lean = standingSkeleton({ leanDeg: 50 });
+    const { summary, states } = playRound((t) => (t >= 3 && t < 3.5 ? null : lean));
+    const area = areaOf(lean);
+    expect(states).toEqual(['COUNTDOWN', 'RECORDING', 'RESULT']);
     expect(summary!.samples).toHaveLength(101);
     for (const x of summary!.samples) expect(x.areaM2).toBeCloseTo(area, 9);
   });

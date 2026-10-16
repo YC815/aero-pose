@@ -4,7 +4,8 @@ import type { ResultView } from './result';
 // 結果卡（1080×1350 PNG）與結果畫面共用的文案、繪圖工具。
 //
 // mask 約定：ImageData 第 0 列在上，「覆蓋」= 不透明（alpha ≥ 128）且夠亮（max(r,g,b) ≥ 128），
-// 所以白底透明、白底黑都可以。mask 是原始方向，畫的時候鏡像，跟玩家在螢幕上看到的一致。
+// 所以白底透明、白底黑都可以。mask（frontalArea）原樣就是鏡像方向（玩家本人的左邊在圖的左邊，
+// 和相機畫面、3D 重播一致），直接畫，不要再翻。
 
 const WIND = '#38bdf8';
 const INK = '#e6f1ff';
@@ -64,28 +65,31 @@ export function tintMask(mask: ImageData, rgb: [number, number, number], alpha: 
   return c;
 }
 
-interface Box {
+export interface Box {
   x: number;
   y: number;
   w: number;
   h: number;
 }
 
-/** 在 box 內畫鏡像的輪廓：等比縮放、水平置中、底部對齊，帶藍色光暈。 */
-function drawSilhouette(ctx: CanvasRenderingContext2D, mask: ImageData, box: Box): void {
-  const img = tintMask(mask, PLAYER_RGB, 1);
-  const s = Math.min(box.w / img.width, box.h / img.height);
-  const w = img.width * s;
-  const h = img.height * s;
+/** 輪廓在 box 內的位置：等比縮放、水平置中、底部對齊。 */
+export function silhouetteRect(box: Box, imgW: number, imgH: number): Box {
+  const s = Math.min(box.w / imgW, box.h / imgH);
+  const w = imgW * s;
+  const h = imgH * s;
+  return { x: box.x + (box.w - w) / 2, y: box.y + box.h - h, w, h };
+}
+
+/** 在 box 內原樣畫輪廓（img = 染色後的 mask，已是鏡像方向，不翻轉），帶藍色光暈。 */
+export function drawSilhouette(ctx: CanvasRenderingContext2D, img: HTMLCanvasElement, box: Box): void {
+  const r = silhouetteRect(box, img.width, img.height);
   ctx.save();
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
-  ctx.translate(box.x + box.w / 2, 0);
-  ctx.scale(-1, 1);
   ctx.shadowColor = 'rgba(56, 189, 248, 0.75)';
   ctx.shadowBlur = 36;
   ctx.globalAlpha = 0.92;
-  ctx.drawImage(img, -w / 2, box.y + box.h - h, w, h);
+  ctx.drawImage(img, r.x, r.y, r.w, r.h);
   ctx.restore();
 }
 
@@ -228,7 +232,7 @@ export async function renderResultCard(v: ResultView): Promise<string> {
   halo.addColorStop(1, 'rgba(56,189,248,0)');
   ctx.fillStyle = halo;
   ctx.fillRect(box.x, box.y, box.w, box.h);
-  drawSilhouette(ctx, v.bestMask, box);
+  drawSilhouette(ctx, tintMask(v.bestMask, PLAYER_RGB, 1), box);
   ctx.strokeStyle = 'rgba(125,211,252,0.35)';
   ctx.lineWidth = 2;
   ctx.beginPath();

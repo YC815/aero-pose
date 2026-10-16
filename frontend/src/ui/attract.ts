@@ -1,9 +1,8 @@
 import type { LeaderboardEntry } from '../types';
 import { LeaderboardPanel } from './leaderboard';
 
-/** 面積儀表的範圍（m²）：趴到底約 0.30，坐直約 0.50。 */
-const GAUGE_MIN = 0.3;
-const GAUGE_MAX = 0.6;
+const RING_R = 44;
+const RING_C = 2 * Math.PI * RING_R;
 
 export const ARMS_UP_SVG = `
   <svg class="ap-armsup" viewBox="0 0 64 64" aria-hidden="true">
@@ -11,11 +10,17 @@ export const ARMS_UP_SVG = `
     <path d="M32 30v18M32 48l-8 12M32 48l8 12M32 32 18 18l-2-12M32 32l14-14 2-12" />
   </svg>`;
 
-/** 待機畫面：吸引路人、教玩法、秀今日排行榜。騎士示範動畫在底下的 3D 場景。 */
+function clamp01(p: number): number {
+  return Math.min(1, Math.max(0, Number.isFinite(p) ? p : 0));
+}
+
+/**
+ * 待機畫面：疊在全螢幕相機畫面上（背景透明），吸引路人、教玩法、秀今日排行榜。
+ * 有玩家站上來時，舉手圖示外面出現進度圈。
+ */
 export class AttractScreen {
   private readonly el: HTMLElement;
-  private readonly areaValue: HTMLElement;
-  private readonly gauge: HTMLElement;
+  private readonly ring: SVGCircleElement;
   private readonly board: LeaderboardPanel;
 
   constructor(root: HTMLElement) {
@@ -25,26 +30,30 @@ export class AttractScreen {
       <div class="ap-attract__hero">
         <p class="ap-eyebrow">公路車空氣力學實驗</p>
         <h1 class="ap-title"><span>風阻</span>姿勢大挑戰</h1>
-        <p class="ap-attract__cta">${ARMS_UP_SVG}<span>站到膠帶上，雙手舉高開始</span></p>
+        <div class="ap-start">
+          <div class="ap-ring">
+            <svg viewBox="0 0 100 100" aria-hidden="true">
+              <circle class="ap-ring__track" cx="50" cy="50" r="${RING_R}" />
+              <circle class="ap-ring__bar" cx="50" cy="50" r="${RING_R}"
+                stroke-dasharray="${RING_C.toFixed(2)}" stroke-dashoffset="${RING_C.toFixed(2)}" />
+            </svg>
+            ${ARMS_UP_SVG}
+          </div>
+          <div class="ap-start__text">
+            <p class="ap-start__cta">雙手舉高開始</p>
+            <p class="ap-start__sub ap-start__sub--idle">站到地上的膠帶，面向螢幕</p>
+            <p class="ap-start__sub ap-start__sub--present">看到你了！手舉高，停住不動</p>
+          </div>
+        </div>
         <ol class="ap-steps">
-          <li><b>1</b><span>站到地上的膠帶</span></li>
-          <li><b>2</b><span>雙手舉過頭 1 秒</span></li>
-          <li><b>3</b><span>壓低身體，停住不動</span></li>
+          <li><b>1</b><span>站到膠帶上，雙手舉高</span></li>
+          <li><b>2</b><span>倒數後，身體趴低、縮小</span></li>
+          <li><b>3</b><span>風打到你的地方會變紅，紅色越少越省力</span></li>
         </ol>
       </div>
       <div class="ap-attract__board"></div>
-      <div class="ap-attract__live">
-        <p class="ap-label">示範騎士 · 正面面積</p>
-        <p class="ap-live"><span class="ap-num ap-live__value">0.000</span><span class="ap-unit">m²</span></p>
-        <div class="ap-gauge" aria-hidden="true">
-          <div class="ap-gauge__fill"></div>
-          <span class="ap-gauge__lo">趴低</span><span class="ap-gauge__hi">坐直</span>
-        </div>
-        <p class="ap-attract__hint">車手趴低騎，就是為了少推一點空氣</p>
-      </div>
       <p class="ap-disclaimer">姿勢比較用，不是風洞量測</p>`;
-    this.areaValue = this.el.querySelector('.ap-live__value') as HTMLElement;
-    this.gauge = this.el.querySelector('.ap-gauge__fill') as HTMLElement;
+    this.ring = this.el.querySelector('.ap-ring__bar') as SVGCircleElement;
     this.board = new LeaderboardPanel(this.el.querySelector('.ap-attract__board') as HTMLElement);
     root.appendChild(this.el);
   }
@@ -57,10 +66,17 @@ export class AttractScreen {
     this.el.classList.remove('is-visible');
   }
 
-  setLiveArea(m2: number): void {
-    this.areaValue.textContent = m2.toFixed(3);
-    const t = Math.min(1, Math.max(0, (m2 - GAUGE_MIN) / (GAUGE_MAX - GAUGE_MIN)));
-    this.gauge.style.transform = `scaleX(${t.toFixed(4)})`;
+  /** 有人站在可玩區：顯示進度圈和「看到你了」；沒人時進度歸零、回到呼吸動畫。 */
+  setPlayerPresent(b: boolean): void {
+    this.el.classList.toggle('is-present', b);
+    if (!b) this.setStartProgress(0);
+  }
+
+  /** 舉手進度 0–1（滿了就要進倒數）。 */
+  setStartProgress(p: number): void {
+    const t = clamp01(p);
+    this.ring.style.strokeDashoffset = (RING_C * (1 - t)).toFixed(2);
+    this.el.classList.toggle('is-start-full', t >= 1);
   }
 
   setLeaderboard(e: LeaderboardEntry[]): void {

@@ -12,8 +12,8 @@ interface Field {
   step: number;
 }
 
-// 時間類欄位的 min 一律 > 0（≤ 0 會讓狀態機每幀在 READY / ATTRACT 間來回跳）：
-// 持續、逾時類 ≥ 0.5 s，countdown_s、result_s ≥ 1 s。
+// 時間類欄位的 min 一律 > 0（≤ 0 會讓狀態機每幀來回跳）：
+// 持續、逾時類 ≥ 0.5 s，countdown_s ≥ 1 s，record_s ≥ 3 s，result_s ≥ 3 s。
 const GROUPS: { title: string; fields: Field[] }[] = [
   {
     title: '偵測',
@@ -38,10 +38,8 @@ const GROUPS: { title: string; fields: Field[] }[] = [
     title: '遊戲節奏',
     fields: [
       { key: 'start_hold_s', label: '舉手持續 (s)', min: 0.5, max: 5, step: 0.1 },
-      { key: 'stillness_speed_mps', label: '靜止速度門檻 (m/s)', min: 0.02, max: 0.6, step: 0.01 },
-      { key: 'stillness_hold_s', label: '靜止持續 (s)', min: 0.5, max: 5, step: 0.1 },
-      { key: 'posing_max_s', label: '擺姿勢上限 (s)', min: 5, max: 60, step: 1 },
       { key: 'countdown_s', label: '倒數 (s)', min: 1, max: 10, step: 1 },
+      { key: 'record_s', label: '錄製長度 (s)', min: 3, max: 30, step: 1 },
       { key: 'result_s', label: '結果顯示 (s)', min: 3, max: 60, step: 1 },
       { key: 'lost_timeout_s', label: '失去玩家逾時 (s)', min: 0.5, max: 10, step: 0.5 },
     ],
@@ -149,7 +147,11 @@ export class SettingsPanel {
 
   /** 收到後端廣播的 settings 時同步顯示。 */
   setSettings(s: Settings): void {
-    Object.assign(this.values, s);
+    // 只收認得的數字欄位：舊版後端多送的欄位（stillness_* 等）不會被 PUT 回去，缺的欄位沿用目前值
+    for (const f of FIELDS) {
+      const v = (s as Partial<Settings>)[f.key];
+      if (typeof v === 'number') this.values[f.key] = v;
+    }
     for (const c of this.controllers) c.updateDisplay();
     this.setSynced(true);
   }

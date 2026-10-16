@@ -2,7 +2,7 @@ import type { LeaderboardEntry } from '../types';
 
 const MAX_ROWS = 10;
 
-/** 今日排行榜：依面積由小到大（後端已排序），前 3 名用螢光黃。 */
+/** 今日排行榜：主要數字是平均省幾瓦（後端依面積排序，等同依瓦數由大到小），前 3 名用螢光黃。 */
 export class LeaderboardPanel {
   private readonly el: HTMLElement;
   private readonly list: HTMLOListElement;
@@ -13,10 +13,10 @@ export class LeaderboardPanel {
     this.el.innerHTML = `
       <header class="ap-board__head">
         <h2 class="ap-board__title">今日排行榜</h2>
-        <p class="ap-board__sub">正面面積越小，名次越前面</p>
+        <p class="ap-board__sub">平均省越多瓦，名次越前面</p>
       </header>
       <div class="ap-board__cols" aria-hidden="true">
-        <span>名次</span><span>騎士</span><span>面積</span><span>省下</span>
+        <span>名次</span><span>騎士</span><span>平均省</span>
       </div>
       <ol class="ap-board__list"></ol>`;
     this.list = this.el.querySelector('ol') as HTMLOListElement;
@@ -41,10 +41,11 @@ export class LeaderboardPanel {
       if (highlightId !== undefined && e.id === highlightId) li.classList.add('is-you');
       li.style.setProperty('--i', String(i));
       const watts = Math.round(e.watts_saved);
+      const who = cell('ap-board__who', `騎士 #${e.number}`);
+      who.appendChild(cell('ap-board__area', `${e.area_m2.toFixed(3)} m²`));
       li.append(
         cell('ap-board__rank', String(i + 1)),
-        cell('ap-board__who', `騎士 #${e.number}`),
-        cell('ap-board__area', e.area_m2.toFixed(3), 'm²'),
+        who,
         cell('ap-board__watts', watts >= 0 ? String(watts) : `−${-watts}`, '瓦'),
       );
       this.list.appendChild(li);

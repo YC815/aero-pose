@@ -1,47 +1,41 @@
+import { COLOR_SAVED, FONT_NUM, FONT_TEXT, drawWattsChart } from './chart';
 import type { ResultView } from './result';
 
-// 結果卡（1080×1350 PNG）與結果畫面共用的繪圖、文案工具。
+// 結果卡（1080×1350 PNG）與結果畫面共用的文案、繪圖工具。
 //
-// mask 約定：ImageData 第 0 列在上（正面看過去的影像方向），
-// 「覆蓋」= 不透明（alpha ≥ 128）且夠亮（max(r,g,b) ≥ 128），
-// 所以白底透明、白底黑都可以；兩張 mask 必須同一個比例尺（每像素同樣公尺數）。
-
-export const FONT_TEXT = '"PingFang TC", "Noto Sans TC", "Microsoft JhengHei", sans-serif';
-export const FONT_NUM = '-apple-system, "SF Pro Display", "Helvetica Neue", "PingFang TC", sans-serif';
+// mask 約定：ImageData 第 0 列在上，「覆蓋」= 不透明（alpha ≥ 128）且夠亮（max(r,g,b) ≥ 128），
+// 所以白底透明、白底黑都可以。mask 是原始方向，畫的時候鏡像，跟玩家在螢幕上看到的一致。
 
 const WIND = '#38bdf8';
-const HIGHLIGHT = '#facc15';
 const INK = '#e6f1ff';
 const DIM = '#7f93b3';
 const PLAYER_RGB: [number, number, number] = [56, 189, 248];
-const BASE_RGB: [number, number, number] = [148, 163, 184];
 
 export const DISCLAIMER = '姿勢比較用，不是風洞量測';
 export const EXPLAIN = '身體越低越窄，迎面要推開的空氣越少';
 
 export interface ResultTexts {
-  area: string; // "0.412"
-  pctLabel: string; // "比坐直少" / "比坐直多"
-  pct: string; // "18.3%"
-  speedKmh: number;
+  seconds: string; // "10"
+  speedKmh: number; // 40
+  saved: boolean; // 平均瓦數 ≥ 0
   wattsVerb: string; // "省" / "多花"
-  watts: string; // "37 瓦"
-  wattsNum: string; // "37"
-  saved: boolean;
+  wattsNum: string; // "37"（絕對值）
+  pctVerb: string; // "少" / "多"
+  pct: string; // "18%"（絕對值）
 }
 
-export function resultTexts(d: ResultView): ResultTexts {
-  const pct = Math.round(d.pct * 10) / 10;
-  const saved = Math.round(d.watts) >= 0;
+export function resultTexts(v: ResultView): ResultTexts {
+  const s = v.summary;
+  const watts = Math.round(Number.isFinite(s.meanWatts) ? s.meanWatts : 0);
+  const pct = Math.round(Number.isFinite(s.pct) ? s.pct : 0);
   return {
-    area: d.areaM2.toFixed(3),
-    pctLabel: pct >= 0 ? '比坐直少' : '比坐直多',
-    pct: `${Math.abs(pct).toFixed(1)}%`,
-    speedKmh: Math.round(d.speedKmh ?? 40),
-    wattsVerb: saved ? '省' : '多花',
-    watts: `${Math.abs(Math.round(d.watts))} 瓦`,
-    wattsNum: String(Math.abs(Math.round(d.watts))),
-    saved,
+    seconds: String(Number((s.durationS > 0 ? s.durationS : 10).toFixed(1))),
+    speedKmh: Math.round(v.speedKmh),
+    saved: watts >= 0,
+    wattsVerb: watts >= 0 ? '省' : '多花',
+    wattsNum: String(Math.abs(watts)),
+    pctVerb: pct >= 0 ? '少' : '多',
+    pct: `${Math.abs(pct)}%`,
   };
 }
 
@@ -68,51 +62,56 @@ export function tintMask(mask: ImageData, rgb: [number, number, number], alpha: 
   return c;
 }
 
-export interface Box {
+interface Box {
   x: number;
   y: number;
   w: number;
   h: number;
 }
 
-/**
- * 在 box 內畫兩個正面輪廓：坐直基準灰在下、玩家藍在上。
- * 兩者同一個縮放、水平置中、底部對齊（輪子都踩在同一條地面線）。
- */
-export function drawSilhouettes(
-  ctx: CanvasRenderingContext2D,
-  d: Pick<ResultView, 'playerMask' | 'baselineMask'>,
-  box: Box,
-  glow = 28,
-): void {
-  const pm = d.playerMask;
-  const bm = d.baselineMask;
-  const srcW = Math.max(pm.width, bm.width, 1);
-  const srcH = Math.max(pm.height, bm.height, 1);
-  const s = Math.min(box.w / srcW, box.h / srcH);
-  const bottom = box.y + box.h;
-  const cx = box.x + box.w / 2;
-
-  const place = (m: ImageData) => {
-    const w = m.width * s;
-    const h = m.height * s;
-    return { x: cx - w / 2, y: bottom - h, w, h };
-  };
-
+/** 在 box 內畫鏡像的輪廓：等比縮放、水平置中、底部對齊，帶藍色光暈。 */
+function drawSilhouette(ctx: CanvasRenderingContext2D, mask: ImageData, box: Box): void {
+  const img = tintMask(mask, PLAYER_RGB, 1);
+  const s = Math.min(box.w / img.width, box.h / img.height);
+  const w = img.width * s;
+  const h = img.height * s;
   ctx.save();
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
-
-  const b = place(bm);
-  ctx.drawImage(tintMask(bm, BASE_RGB, 0.5), b.x, b.y, b.w, b.h);
-
-  const p = place(pm);
-  const player = tintMask(pm, PLAYER_RGB, 1);
+  ctx.translate(box.x + box.w / 2, 0);
+  ctx.scale(-1, 1);
   ctx.shadowColor = 'rgba(56, 189, 248, 0.75)';
-  ctx.shadowBlur = glow;
+  ctx.shadowBlur = 36;
   ctx.globalAlpha = 0.92;
-  ctx.drawImage(player, p.x, p.y, p.w, p.h);
+  ctx.drawImage(img, -w / 2, box.y + box.h - h, w, h);
   ctx.restore();
+}
+
+interface Run {
+  text: string;
+  weight: number;
+  size: number;
+  family: string;
+  color: string;
+  gap?: number; // 這段之前的間距（px，跟著縮放）
+}
+
+/** 依序畫一串文字片段；總寬超過 maxW 時整串等比縮小（瓦數破百、「多花」都不會爆版）。 */
+function drawRuns(ctx: CanvasRenderingContext2D, x: number, y: number, runs: Run[], maxW: number): void {
+  const font = (r: Run, k: number) => `${r.weight} ${Math.round(r.size * k)}px ${r.family}`;
+  let total = 0;
+  for (const r of runs) {
+    ctx.font = font(r, 1);
+    total += (r.gap ?? 0) + ctx.measureText(r.text).width;
+  }
+  const k = total > maxW ? maxW / total : 1;
+  for (const r of runs) {
+    x += (r.gap ?? 0) * k;
+    ctx.font = font(r, k);
+    ctx.fillStyle = r.color;
+    ctx.fillText(r.text, x, y);
+    x += ctx.measureText(r.text).width;
+  }
 }
 
 function today(): string {
@@ -120,22 +119,6 @@ function today(): string {
   const mm = String(t.getMonth() + 1).padStart(2, '0');
   const dd = String(t.getDate()).padStart(2, '0');
   return `${t.getFullYear()}-${mm}-${dd}`;
-}
-
-/** 依序畫一串不同顏色、字型的文字片段，回傳結束的 x。 */
-function drawRuns(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  runs: { text: string; font: string; color: string }[],
-): number {
-  for (const r of runs) {
-    ctx.font = r.font;
-    ctx.fillStyle = r.color;
-    ctx.fillText(r.text, x, y);
-    x += ctx.measureText(r.text).width;
-  }
-  return x;
 }
 
 /** 決定性的偽亂數，讓每張卡的背景風線一樣。 */
@@ -174,8 +157,14 @@ function drawBackground(ctx: CanvasRenderingContext2D, W: number, H: number): vo
   ctx.restore();
 }
 
+function label(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, size = 30, color = DIM): void {
+  ctx.font = `600 ${size}px ${FONT_TEXT}`;
+  ctx.fillStyle = color;
+  ctx.fillText(text, x, y);
+}
+
 /** 產生 1080×1350 結果卡，回傳 PNG base64（不含 data: 前綴）。 */
-export async function renderResultCard(d: ResultView): Promise<string> {
+export async function renderResultCard(v: ResultView): Promise<string> {
   const W = 1080;
   const H = 1350;
   const PAD = 84;
@@ -186,14 +175,13 @@ export async function renderResultCard(d: ResultView): Promise<string> {
   if (!ctx) throw new Error('無法建立 2D canvas');
   await document.fonts?.ready;
 
-  const t = resultTexts(d);
+  const t = resultTexts(v);
+  const s = v.summary;
   drawBackground(ctx, W, H);
   ctx.textBaseline = 'alphabetic';
 
   // 標頭
-  ctx.font = `600 30px ${FONT_TEXT}`;
-  ctx.fillStyle = WIND;
-  ctx.fillText('公路車空氣力學實驗', PAD, 104);
+  label(ctx, '公路車空氣力學實驗', PAD, 104, 30, WIND);
   ctx.font = `800 78px ${FONT_TEXT}`;
   ctx.fillStyle = INK;
   ctx.fillText('風阻姿勢大挑戰', PAD, 192);
@@ -203,57 +191,66 @@ export async function renderResultCard(d: ResultView): Promise<string> {
   ctx.fillText(today(), W - PAD, 104);
   ctx.textAlign = 'left';
 
-  // 輪廓
-  const box: Box = { x: PAD, y: 240, w: W - PAD * 2, h: 540 };
-  const halo = ctx.createRadialGradient(W / 2, box.y + box.h * 0.6, 40, W / 2, box.y + box.h * 0.6, box.w * 0.6);
-  halo.addColorStop(0, 'rgba(56,189,248,0.10)');
+  // 數字：平均省 X 瓦（左）、比坐直平均少 X%（右）
+  const RX = 650;
+  const ny = 440;
+  const wattsColor = t.saved ? COLOR_SAVED : INK;
+  label(ctx, `${t.seconds} 秒平均 · 時速 ${t.speedKmh} km 估算`, PAD, 290);
+  drawRuns(
+    ctx,
+    PAD,
+    ny,
+    [
+      { text: t.wattsVerb, weight: 800, size: 76, family: FONT_TEXT, color: wattsColor },
+      { text: t.wattsNum, weight: 800, size: 170, family: FONT_NUM, color: wattsColor, gap: 12 },
+      { text: '瓦', weight: 700, size: 64, family: FONT_TEXT, color: DIM, gap: 10 },
+    ],
+    RX - PAD - 40,
+  );
+  label(ctx, '比坐直平均', RX, 290);
+  drawRuns(
+    ctx,
+    RX,
+    ny,
+    [
+      { text: t.pctVerb, weight: 800, size: 64, family: FONT_TEXT, color: INK },
+      { text: t.pct, weight: 800, size: 128, family: FONT_NUM, color: t.saved ? WIND : INK, gap: 10 },
+    ],
+    W - PAD - RX,
+  );
+
+  // 左：最趴低瞬間的輪廓
+  const box: Box = { x: PAD, y: 560, w: 360, h: 460 };
+  const halo = ctx.createRadialGradient(box.x + box.w / 2, box.y + box.h * 0.6, 30, box.x + box.w / 2, box.y + box.h * 0.6, box.w * 0.7);
+  halo.addColorStop(0, 'rgba(56,189,248,0.12)');
   halo.addColorStop(1, 'rgba(56,189,248,0)');
   ctx.fillStyle = halo;
   ctx.fillRect(box.x, box.y, box.w, box.h);
-  drawSilhouettes(ctx, d, box, 36);
+  drawSilhouette(ctx, v.bestMask, box);
   ctx.strokeStyle = 'rgba(125,211,252,0.35)';
   ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.moveTo(PAD, box.y + box.h + 1);
-  ctx.lineTo(W - PAD, box.y + box.h + 1);
+  ctx.moveTo(box.x, box.y + box.h + 1);
+  ctx.lineTo(box.x + box.w, box.y + box.h + 1);
   ctx.stroke();
+  label(ctx, '最趴低的瞬間', PAD, box.y + box.h + 52, 28, INK);
 
-  // 圖例
-  const ly = box.y + box.h + 52;
-  ctx.font = `500 28px ${FONT_TEXT}`;
-  ctx.fillStyle = WIND;
-  ctx.fillRect(PAD, ly - 22, 26, 26);
-  ctx.fillStyle = INK;
-  ctx.fillText('你的姿勢', PAD + 40, ly);
-  ctx.fillStyle = 'rgba(148,163,184,0.6)';
-  ctx.fillRect(PAD + 210, ly - 22, 26, 26);
-  ctx.fillStyle = INK;
-  ctx.fillText('一般坐直騎', PAD + 250, ly);
+  // 右：瓦數曲線，遊標標出最趴低的瞬間
+  const cx = PAD + box.w + 48;
+  const cw = W - PAD - cx;
+  label(ctx, '每一刻省下的瓦數', cx, 540, 28, INK);
+  ctx.save();
+  ctx.translate(cx, 570);
+  ctx.fillStyle = 'rgba(6, 15, 33, 0.6)';
+  ctx.fillRect(0, 0, cw, 450);
+  const best = s.samples[s.bestIndex];
+  drawWattsChart(ctx, s.samples, { width: cw, height: 450, durationS: s.durationS, showAxis: true }, best?.t);
+  ctx.restore();
 
-  // 數字
-  const ny = 1040;
-  ctx.font = `600 32px ${FONT_TEXT}`;
-  ctx.fillStyle = DIM;
-  ctx.fillText('正面面積', PAD, ny - 140);
-  const ax = drawRuns(ctx, PAD, ny, [{ text: t.area, font: `800 150px ${FONT_NUM}`, color: INK }]);
-  drawRuns(ctx, ax + 12, ny, [{ text: 'm²', font: `600 56px ${FONT_NUM}`, color: DIM }]);
-
-  const rx = 640;
-  ctx.font = `600 32px ${FONT_TEXT}`;
-  ctx.fillStyle = DIM;
-  ctx.fillText(t.pctLabel, rx, ny - 140);
-  drawRuns(ctx, rx, ny, [{ text: t.pct, font: `800 120px ${FONT_NUM}`, color: t.saved ? WIND : INK }]);
-
-  drawRuns(ctx, PAD, ny + 100, [
-    { text: `時速 ${t.speedKmh} km 約${t.wattsVerb} `, font: `600 44px ${FONT_TEXT}`, color: INK },
-    { text: t.watts, font: `800 52px ${FONT_TEXT}`, color: t.saved ? HIGHLIGHT : INK },
-    { text: '（估算）', font: `500 34px ${FONT_TEXT}`, color: DIM },
-  ]);
-
-  ctx.font = `500 34px ${FONT_TEXT}`;
-  ctx.fillStyle = 'rgba(230,241,255,0.82)';
-  ctx.fillText(EXPLAIN, PAD, ny + 178);
-
+  // 說明、免責
+  ctx.font = `600 36px ${FONT_TEXT}`;
+  ctx.fillStyle = 'rgba(230,241,255,0.9)';
+  ctx.fillText(EXPLAIN, PAD, 1180);
   ctx.font = `400 24px ${FONT_TEXT}`;
   ctx.fillStyle = DIM;
   ctx.fillText(DISCLAIMER, PAD, H - 56);

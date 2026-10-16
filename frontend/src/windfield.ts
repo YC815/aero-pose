@@ -1,4 +1,4 @@
-import { type CameraView, type CoverMap, type MaskFrame, screenToMask, sourceToScreenInto } from './camera';
+import { type CameraView, type CoverMap, type MaskFrame, mirrorTransform, screenToMask, sourceToScreenInto } from './camera';
 
 // 3D 透視風流＋紅色迎風面（v1.1，取代 v1 的 wind.ts）。
 //
@@ -268,6 +268,8 @@ export class WindSim {
   }
 
   step(dt: number, env: WindEnv): void {
+    if (!(dt > 0) || !Number.isFinite(dt)) return;
+    dt = Math.min(MAX_DT, dt);
     const { vw, vh, map, mask } = env;
     this.aspect = vw / vh;
     const heat = this.heat;
@@ -437,6 +439,7 @@ export class WindField {
   private readonly qw: Float32Array;
   private readonly qb: Uint8Array;
   private quadCount = 0;
+  private readonly mat = [0, 0, 0, 0, 0, 0];
 
   constructor(container: HTMLElement, camera: CameraView, count = DEFAULT_COUNT) {
     this.camera = camera;
@@ -480,7 +483,9 @@ export class WindField {
   }
 
   update(dt: number): void {
-    dt = Math.min(MAX_DT, Math.max(0, dt));
+    // 分頁切回來、計時器出錯時 dt 可能是 NaN / Infinity / 負值：直接略過，否則 opacity、粒子、熱度會永久變 NaN
+    if (!(dt > 0) || !Number.isFinite(dt)) return;
+    dt = Math.min(MAX_DT, dt);
     const step = dt / FADE_S;
     this.opacity =
       this.target > this.opacity ? Math.min(this.target, this.opacity + step) : Math.max(this.target, this.opacity - step);
@@ -594,8 +599,10 @@ export class WindField {
     // mask 像素 → 來源像素 → 鏡像 cover → 裝置像素
     const ctx = this.ctx;
     const d = this.dpr;
-    const s = map.scale;
-    ctx.setTransform((-s * map.srcW * d) / w, 0, 0, (s * map.srcH * d) / h, (map.offsetX + map.srcW * s) * d, map.offsetY * d);
+    const t = mirrorTransform(map, this.mat);
+    ctx.setTransform(d, 0, 0, d, 0, 0);
+    ctx.transform(t[0], t[1], t[2], t[3], t[4], t[5]);
+    ctx.scale(map.srcW / w, map.srcH / h);
     ctx.imageSmoothingEnabled = true;
     ctx.globalCompositeOperation = 'source-over';
     ctx.globalAlpha = this.opacity;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { coverMap, decodeMask, screenToMask, screenToSource, sourceToScreen } from '../src/camera';
+import { coverMap, decodeMask, mirrorTransform, screenToMask, screenToSource, sourceToScreen } from '../src/camera';
 
 function b64(bytes: number[]): string {
   return btoa(String.fromCharCode(...bytes));
@@ -70,6 +70,37 @@ describe('coverMap', () => {
     expect(m.scale).toBeCloseTo(3);
     expect(m.offsetX).toBeCloseTo(0);
     expect(m.offsetY).toBeCloseTo((1080 - 480 * 3) / 2);
+  });
+});
+
+describe('mirrorTransform', () => {
+  it('用矩陣 [a,b,c,d,e,f] 轉換來源點 = sourceToScreen（含裁切、直式）', () => {
+    for (const [w, h, vw, vh] of [
+      [1280, 720, 1920, 1080],
+      [960, 540, 1080, 1920],
+      [640, 480, 1920, 1080],
+    ]) {
+      const m = coverMap(w, h, vw, vh);
+      const [a, b, c, d, e, f] = mirrorTransform(m);
+      for (const [u, v] of [
+        [0, 0],
+        [w, h],
+        [123.4, 56.7],
+        [w / 2, h / 3],
+      ]) {
+        const [sx, sy] = sourceToScreen(m, u, v);
+        expect(a * u + c * v + e).toBeCloseTo(sx, 6);
+        expect(b * u + d * v + f).toBeCloseTo(sy, 6);
+      }
+    }
+  });
+
+  it('可寫進重用的 out 陣列（每幀零配置）', () => {
+    const out = [0, 0, 0, 0, 0, 0];
+    const m = coverMap(1280, 720, 1920, 1080);
+    expect(mirrorTransform(m, out)).toBe(out);
+    expect(out[0]).toBeCloseTo(-1.5);
+    expect(out[4]).toBeCloseTo(1920);
   });
 });
 

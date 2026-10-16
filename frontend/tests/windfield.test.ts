@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest';
-import { coverMap } from '../src/camera';
-import { HeatField, hitMask, maskBounds, WindSim, type WindEnv } from '../src/windfield';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { type CameraView, coverMap } from '../src/camera';
+import { HeatField, hitMask, maskBounds, WindField, WindSim, type WindEnv } from '../src/windfield';
 
 function sum(a: Float32Array): number {
   let s = 0;
@@ -173,5 +173,76 @@ describe('WindSim', () => {
     const e: WindEnv = { vw, vh, map: null, mask: null };
     run(sim, e, 0.5);
     expect(sum(sim.heat.data)).toBe(0);
+  });
+});
+
+/** 什麼都接受的假 2D context：任何方法都是 no-op。 */
+function fakeCtx(): CanvasRenderingContext2D {
+  const target: Record<string | symbol, unknown> = {
+    createImageData: (w: number, h: number) => ({ width: w, height: h, data: new Uint8ClampedArray(w * h * 4) }),
+  };
+  return new Proxy(target, {
+    get: (t, k) => (k in t ? t[k] : () => {}),
+    set: (t, k, v) => {
+      t[k] = v;
+      return true;
+    },
+  }) as unknown as CanvasRenderingContext2D;
+}
+
+function fakeCanvas() {
+  return { style: {}, width: 0, height: 0, className: '', getContext: () => fakeCtx(), remove: () => {} };
+}
+
+function allFinite(a: ArrayLike<number>): boolean {
+  for (let i = 0; i < a.length; i++) if (!Number.isFinite(a[i])) return false;
+  return true;
+}
+
+describe('WindField 防呆', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('update(NaN)、update(Infinity) 之後再 update(0.016)：opacity、粒子、熱度都是有限值', () => {
+    vi.stubGlobal('document', { createElement: () => fakeCanvas() });
+    vi.stubGlobal('window', { innerWidth: 1920, innerHeight: 1080, devicePixelRatio: 1 });
+    const mw = 192;
+    const mh = 108;
+    const camera = {
+      canvas: { parentNode: null },
+      map: coverMap(960, 540, 1920, 1080),
+      mask: { data: new Uint8Array(mw * mh).fill(255), w: mw, h: mh },
+    } as unknown as CameraView;
+    const container = { appendChild: () => {} } as unknown as HTMLElement;
+    const wf = new WindField(container, camera, 200);
+    const inner = wf as unknown as { opacity: number; sim: WindSim };
+
+    wf.setActive(true);
+    for (let i = 0; i < 30; i++) wf.update(0.016);
+    for (const bad of [NaN, Infinity, -Infinity, -1, 0]) {
+      wf.update(bad);
+      wf.update(0.016);
+      expect(Number.isFinite(inner.opacity)).toBe(true);
+      expect(inner.opacity).toBeGreaterThan(0);
+      for (const arr of [inner.sim.z, inner.sim.x, inner.sim.sx, inner.sim.age, inner.sim.heat.data]) {
+        expect(allFinite(arr)).toBe(true);
+      }
+    }
+    expect(inner.sim.heat.data.some((v) => v > 0)).toBe(true);
+  });
+
+  it('WindSim.step 也擋掉非有限 dt', () => {
+    const sim = new WindSim(100, rng(9));
+    const e: WindEnv = {
+      vw: 1920,
+      vh: 1080,
+      map: coverMap(960, 540, 1920, 1080),
+      mask: { data: new Uint8Array(192 * 108).fill(255), w: 192, h: 108 },
+    };
+    sim.step(0.016, e);
+    sim.step(NaN, e);
+    sim.step(Infinity, e);
+    sim.step(0.016, e);
+    expect(allFinite(sim.z)).toBe(true);
+    expect(allFinite(sim.heat.data)).toBe(true);
   });
 });

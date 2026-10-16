@@ -29,16 +29,34 @@ export function coverMap(srcW: number, srcH: number, vw: number, vh: number): Co
   };
 }
 
-/** 螢幕 → 來源（已含鏡像），寫進 out，不配置記憶體（給每幀迴圈用）。 */
+/**
+ * 「cover + 水平鏡像」的唯一定義：來源 (u, v) → 螢幕 (a·u + c·v + e, b·u + d·v + f)。
+ * 回傳 [a, b, c, d, e, f]，可直接給 ctx.setTransform / ctx.transform；傳入 out 可重用陣列（每幀零配置）。
+ */
+export function mirrorTransform(m: CoverMap, out: number[] = [0, 0, 0, 0, 0, 0]): number[] {
+  out[0] = -m.scale;
+  out[1] = 0;
+  out[2] = 0;
+  out[3] = m.scale;
+  out[4] = m.offsetX + m.srcW * m.scale;
+  out[5] = m.offsetY;
+  return out;
+}
+
+const scratchMat = [0, 0, 0, 0, 0, 0];
+
+/** 螢幕 → 來源（mirrorTransform 的反函式；矩陣只有對角項），寫進 out，不配置記憶體（給每幀迴圈用）。 */
 export function screenToSourceInto(m: CoverMap, sx: number, sy: number, out: number[]): void {
-  out[0] = m.srcW - (sx - m.offsetX) / m.scale;
-  out[1] = (sy - m.offsetY) / m.scale;
+  const t = mirrorTransform(m, scratchMat);
+  out[0] = (sx - t[4]) / t[0];
+  out[1] = (sy - t[5]) / t[3];
 }
 
 /** 來源 → 螢幕（已含鏡像），寫進 out，不配置記憶體。 */
 export function sourceToScreenInto(m: CoverMap, u: number, v: number, out: number[]): void {
-  out[0] = m.offsetX + (m.srcW - u) * m.scale;
-  out[1] = m.offsetY + v * m.scale;
+  const t = mirrorTransform(m, scratchMat);
+  out[0] = t[0] * u + t[2] * v + t[4];
+  out[1] = t[1] * u + t[3] * v + t[5];
 }
 
 export function screenToSource(m: CoverMap, sx: number, sy: number): [number, number] {
@@ -100,6 +118,7 @@ export class CameraView {
   private disposed = false;
   private warnedMask = false;
   private readonly onResize = (): void => this.draw();
+  private readonly mat = [0, 0, 0, 0, 0, 0];
 
   constructor(container: HTMLElement) {
     const canvas = document.createElement('canvas');
@@ -205,8 +224,8 @@ export class CameraView {
     }
     const map = this.currentMap!;
     const ctx = this.ctx;
-    // 水平鏡像：螢幕 x = offsetX + (srcW − u) · scale
-    ctx.setTransform(-map.scale, 0, 0, map.scale, map.offsetX + map.srcW * map.scale, map.offsetY);
+    const t = mirrorTransform(map, this.mat);
+    ctx.setTransform(t[0], t[1], t[2], t[3], t[4], t[5]);
     ctx.imageSmoothingEnabled = true;
     ctx.drawImage(bmp, 0, 0);
     ctx.setTransform(1, 0, 0, 1, 0, 0);

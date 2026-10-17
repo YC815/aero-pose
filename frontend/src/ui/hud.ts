@@ -36,7 +36,7 @@ export class Hud {
           <p class="ap-hud__left">剩 <b class="ap-num ap-hud__left-n"></b> 秒</p>
         </div>
         <div class="ap-hud__bottom">
-          <p class="ap-hud__tip">趴低、縮小，讓紅色變少！</p>
+          <p class="ap-hud__tip">只算上半身：趴低、縮小，讓紅色變少！</p>
           <canvas class="ap-hud__chart"></canvas>
         </div>
       </div>`;

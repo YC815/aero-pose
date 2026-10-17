@@ -93,7 +93,7 @@ const SLIDE_HTML = [
    <div class="ap-tour__text">
      <p class="ap-tour__kicker">錄 <b data-k="record">10</b> 秒</p>
      <p class="ap-tour__title">倒數後趴低，撐住</p>
-     <p class="ap-tour__cap">風打到你的地方會變紅<br>紅色越少，越省力</p>
+     <p class="ap-tour__cap">風打到上半身會變紅（腿不算）<br>紅色越少，越省力</p>
    </div>`,
   `<div class="ap-tour__art">
      <svg class="ap-tour__svg ap-tour__podium" viewBox="0 0 100 100" aria-hidden="true">

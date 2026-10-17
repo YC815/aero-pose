@@ -104,3 +104,59 @@ def test_frame_二進位格式():
     jpeg = buf[4 + n : 4 + n + header["jpeg_len"]]
     assert jpeg[:2] == b"\xff\xd8"
     assert len(buf) == 4 + n + header["jpeg_len"] + header["mask_w"] * header["mask_h"]
+
+
+def _standing(wrist_y=200.0):
+    """640×480 畫面裡面對相機站著的人：肩 y=120、肩寬 100 px、髖 y=240，手腕高度可調。"""
+    return {
+        "nose": [320.0, 80.0],
+        "left_ear": [340.0, 75.0],
+        "right_ear": [300.0, 75.0],
+        "left_shoulder": [370.0, 120.0],
+        "right_shoulder": [270.0, 120.0],
+        "left_elbow": [400.0, 180.0],
+        "right_elbow": [240.0, 180.0],
+        "left_wrist": [410.0, wrist_y],
+        "right_wrist": [230.0, wrist_y],
+        "left_hip": [350.0, 240.0],
+        "right_hip": [290.0, 240.0],
+    }
+
+
+def _player_result(pixels, mask, selected=True):
+    r = _frame_result(mask)
+    r.persons = [{"bbox": [0.0, 0.0, 1.0, 1.0], "selected": selected, "distance_m": 2.0, "pixels": pixels}]
+    return r
+
+
+def _mask_rows(r):
+    from aero.preview import render_frame, unpack_frame
+
+    msg = unpack_frame(render_frame(r))
+    return np.frombuffer(msg["mask"], np.uint8).reshape(msg["mask_h"], msg["mask_w"])
+
+
+def test_frame_mask只留髖部以上():
+    """計分只看上半身：送給前端的 mask 把腿裁掉，紅色迎風面才不會出現在腿上。"""
+    mask = np.zeros((480, 640), np.float32)
+    mask[50:480, 200:440] = 1.0  # 整個人到畫面底
+    m = _mask_rows(_player_result(_standing(), mask))  # mask 座標 = 原圖 × 0.3
+    assert m[int(100 * 0.3), int(320 * 0.3)] == 255  # 胸口
+    assert m[int(240 * 0.3), int(320 * 0.3)] == 255  # 髖線本身保留
+    assert m[int(320 * 0.3):, :].max() == 0  # 大腿以下全清掉
+
+
+def test_frame_手低於髖線時保留手():
+    """趴低時手可能比髖低，手臂有算分，不能一起切掉。"""
+    mask = np.zeros((480, 640), np.float32)
+    mask[50:480, 200:440] = 1.0
+    m = _mask_rows(_player_result(_standing(wrist_y=330.0), mask))
+    assert m[int(330 * 0.3), int(410 * 0.3)] == 255  # 左手腕
+    assert m[int(330 * 0.3), int(320 * 0.3)] == 0  # 兩手之間的腿
+    assert m[int(450 * 0.3):, :].max() == 0
+
+
+def test_frame_沒有選中者時mask不裁():
+    mask = np.ones((480, 640), np.float32)
+    m = _mask_rows(_player_result(_standing(), mask, selected=False))
+    assert m.min() == 255

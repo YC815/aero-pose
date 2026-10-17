@@ -26,6 +26,12 @@ BONES = (
     ("nose", "right_ear"),
 )
 
+# 送給前端的 mask 只留計分會看的上半身：腿固定在後台騎士的踏板上，不算分，不該變紅。
+# 長度都以肩寬為單位（正面時穩定，趴低時軀幹會透視縮短，不能拿來當尺）。
+LEG_CUT_BELOW_HIP = 0.15  # 髖線往下多留這麼多，切在大腿根而不是髖關節上
+ARM_KEEP_RADIUS = 0.45  # 手肘、手腕周圍這個半徑內不切：趴低時手可能比髖低
+ARM_JOINTS = ("left_elbow", "right_elbow", "left_wrist", "right_wrist")
+
 
 def render_preview(r: StepResult, width: int = 480) -> dict:
     rgb = r.frame.rgb
@@ -53,6 +59,19 @@ def render_preview(r: StepResult, width: int = 480) -> dict:
     if not ok:
         raise RuntimeError("JPEG 編碼失敗")
     return {"type": "preview", "jpeg_b64": base64.b64encode(buf.tobytes()).decode("ascii"), "persons": persons}
+
+
+def trim_legs(mask: np.ndarray, pixels: dict, scale: float) -> np.ndarray:
+    """把 mask 髖線以下清成 0（手肘、手腕附近保留）。pixels 是原圖座標，scale = mask 寬 / 原圖寬。"""
+    px = {j: (u * scale, v * scale) for j, (u, v) in pixels.items()}
+    sw = abs(px["left_shoulder"][0] - px["right_shoulder"][0])
+    cut = (px["left_hip"][1] + px["right_hip"][1]) / 2 + LEG_CUT_BELOW_HIP * sw
+    keep = np.zeros(mask.shape, np.uint8)
+    keep[: max(0, int(np.ceil(cut)))] = 1
+    for j in ARM_JOINTS:
+        u, v = px[j]
+        cv2.circle(keep, (round(u), round(v)), max(1, round(ARM_KEEP_RADIUS * sw)), 1, -1)
+    return mask * keep
 
 
 def pack_frame(header: dict, jpeg: bytes, mask: bytes | None) -> bytes:
@@ -86,6 +105,9 @@ def render_frame(r: StepResult, width: int = 960, mask_width: int = 192) -> byte
     mask = None
     if r.selected_mask is not None:
         small = cv2.resize(r.selected_mask.astype(np.float32), (mask_width, mask_h), interpolation=cv2.INTER_AREA)
+        player = next((p for p in r.persons if p["selected"]), None)
+        if player is not None:
+            small = trim_legs(small, player["pixels"], mask_width / src_w)
         mask = np.where(small > 0.5, 255, 0).astype(np.uint8).tobytes()
 
     header = {
